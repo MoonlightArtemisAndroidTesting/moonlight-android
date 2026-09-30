@@ -1944,10 +1944,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 //
                 // It does break reference frame invalidation, so we will not do that for decoders
                 // where we've enabled reference frame invalidation.
-                if (!refFrameInvalidationActive) {
-                    LimeLog.info("Patching num_ref_frames in SPS");
-                    sps.numRefFrames = 1;
-                }
+                LimeLog.info("Patching num_ref_frames in SPS");
+                sps.numRefFrames = 1;
 
                 // GFE 2.5.11 changed the SPS to add additional extensions. Some devices don't like these
                 // so we remove them here on old devices unless these devices also support HEVC.
