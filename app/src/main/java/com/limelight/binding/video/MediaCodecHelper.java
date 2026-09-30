@@ -534,6 +534,12 @@ public class MediaCodecHelper {
         // Options here should be tried in the order of most to least risky. The decoder will use
         // the first MediaFormat that doesn't fail in configure().
 
+        String mimeType = videoFormat.containsKey(MediaFormat.KEY_MIME) ? videoFormat.getString(MediaFormat.KEY_MIME) : null;
+        if ("video/hevc".equalsIgnoreCase(mimeType)) {
+            LimeLog.info("HEVC low-latency options disabled");
+            return false;
+        }
+
         boolean setNewOption = false;
 
 //derflacco
@@ -1160,6 +1166,12 @@ public class MediaCodecHelper {
     //derflacco
     public static void applyExtraVendorOptions(MediaFormat videoFormat, String decoderName) {
         if (videoFormat == null || decoderName == null) return;
+
+        String mimeType = videoFormat.containsKey(MediaFormat.KEY_MIME) ? videoFormat.getString(MediaFormat.KEY_MIME) : null;
+        if ("video/hevc".equalsIgnoreCase(mimeType)) {
+            return;
+        }
+
         // NVIDIA Tegra (Shield TV): enable generic low-latency + disable frame reordering
         if (isNvidiaDecoder(decoderName)) {
             safeSet(videoFormat, "media.low-latency.enable", 1);
