@@ -484,31 +484,6 @@ public class MediaCodecHelper {
     }
 
     private static boolean decoderSupportsKnownVendorLowLatencyOption(String decoderName) {
-        // It's only possible to probe vendor parameters on Android 12 and above.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaCodec testCodec = null;
-            try {
-                // Unfortunately we have to create an actual codec instance to get supported options.
-                testCodec = MediaCodec.createByCodecName(decoderName);
-
-                // See if any of the vendor parameters match ones we know about
-                for (String supportedOption : testCodec.getSupportedVendorParameters()) {
-                    for (String knownLowLatencyOption : knownVendorLowLatencyOptions) {
-                        if (supportedOption.equalsIgnoreCase(knownLowLatencyOption)) {
-                            LimeLog.info(decoderName + " supports known low latency option: " + supportedOption);
-                            return true;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                // Tolerate buggy codecs
-                e.printStackTrace();
-            } finally {
-                if (testCodec != null) {
-                    testCodec.release();
-                }
-            }
-        }
         return false;
     }
 
@@ -543,14 +518,6 @@ public class MediaCodecHelper {
         boolean setNewOption = false;
 
 //derflacco
-        // NVIDIA Tegra extra low-latency toggles
-        if (isNvidiaDecoder(decoderInfo.getName())) {
-            safeSet(videoFormat, "media.low-latency.enable", 1);
-            safeSet(videoFormat, "vendor.low-latency.enable", 1);
-            safeSet(videoFormat, "disable-output-reorder", 1);
-            safeSet(videoFormat, "vendor.nvidia.disable-output-reorder", 1);
-            setNewOption = true;
-        }
         if (tryNumber < 1) {
             // Official Android 11+ low latency option (KEY_LOW_LATENCY).
             videoFormat.setInteger("low-latency", 1);
@@ -592,115 +559,6 @@ public class MediaCodecHelper {
             else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 videoFormat.setInteger(MediaFormat.KEY_PRIORITY, 0);
                 setNewOption = true;
-            }
-        }
-
-        // MediaCodec supports vendor-defined format keys using the "vendor.<extension name>.<parameter name>" syntax.
-        // These allow access to functionality that is not exposed through documented MediaFormat.KEY_* values.
-        // https://cs.android.com/android/platform/superproject/+/master:hardware/qcom/sdm845/media/mm-video-v4l2/vidc/common/inc/vidc_vendor_extensions.h;l=67
-        //
-        // MediaCodec vendor extension support was introduced in Android 8.0:
-        // https://cs.android.com/android/_/android/platform/frameworks/av/+/01c10f8cdcd58d1e7025f426a72e6e75ba5d7fc2
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Try vendor-specific low latency options
-            //
-            // NOTE: Update knownVendorLowLatencyOptions if you modify this code!
-            if (isDecoderInList(qualcommDecoderPrefixes, decoderInfo.getName())) {
-                // Examples of Qualcomm's vendor extensions for Snapdragon 845:
-                // https://cs.android.com/android/platform/superproject/+/master:hardware/qcom/sdm845/media/mm-video-v4l2/vidc/vdec/src/omx_vdec_extensions.hpp
-                // https://cs.android.com/android/_/android/platform/hardware/qcom/sm8150/media/+/0621ceb1c1b19564999db8293574a0e12952ff6c
-                //
-                // We will first try both, then try vendor.qti-ext-dec-low-latency.enable alone if that fails
-                if (tryNumber < 4) {
-                    // Adjust picture-order flag: 0 for OMX.qcom (disable reordering), 1 for C2.*
-                    boolean __isOmxQcom = decoderInfo.getName() != null &&
-                            decoderInfo.getName().toLowerCase(java.util.Locale.US).startsWith("omx.qcom");
-                    safeSet(videoFormat, "vendor.qti-ext-dec-picture-order.enable", __isOmxQcom ? 0 : 1);
-                    setNewOption = true;
-                }
-                if (tryNumber < 5) {
-                    videoFormat.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
-
-                    //ALONSOJR1980 - CONFIRMED WORKING: Snapdragon Elite, SD8 gen 3, SD8 gen 2
-                    //latency-wise, software fencing is the most important flag for latest Snapdragons
-                    videoFormat.setInteger("vendor.qti-ext-output-sw-fence-enable.value", 1); //Snapdragon 8 gen 2
-                    videoFormat.setInteger("vendor.qti-ext-output-fence.enable", 1); // Snapdragon 8s Gen 3 and Elite
-                    videoFormat.setInteger("vendor.qti-ext-output-fence.fence_type", 1); // Snapdragon 8s Gen 3 and ELite / 0 = none, 1 = sw, 2 = hw, 3 = hybrid. Best option = 1
-                    ////////////////////////////////////////////////////////////////////////////////
-
-                    setNewOption = true;
-                }
-            }
-            // ALONSOJR1980
-//            else if (isDecoderInList(mtkDecoderPrefixes, decoderInfo.getName())) {
-//                if (tryNumber < 4) {
-//
-//                    videoFormat.setInteger("vendor.mtk.vdec.cpu.boost.mode.value", 2);
-//                    videoFormat.setInteger("vendor.mtk.ext.dolby.vision.cpu-boost", 1);
-//                    videoFormat.setInteger("vendor.mtk.vdec.bq.guard.interval.time.value", 2);
-//                    videoFormat.setInteger("vendor.mtk.vdec.buffer.fetch.timeout.ms.value", 2);
-            else if (isDecoderInList(mtkDecoderPrefixes, decoderInfo.getName())) {
-                if (tryNumber < 4) {
-                    // --- PRESET: MTK Low-Latency (safe & balanced, no duplicates) ---
-
-                    // Boost/DVFS: moderate profile
-                    safeSet(videoFormat, "vdec-lowlatency", 1);
-                    safeSet(videoFormat, "vendor.mtk.vdec.cpu.boost.mode", 1);
-                    safeSet(videoFormat, "vendor.mtk.vdec.cpu.boost.mode.value", 1);
-                    safeSet(videoFormat, "vendor.mtk.vdec.dvfs.mode", 1);
-                    safeSet(videoFormat, "vendor.mtk.vdec.dvfs.level", 1);
-
-                    // Pipeline / code path
-                    safeSet(videoFormat, "vendor.mtk.vdec.low-latency.mode", 1);    // Enable low-latency path
-                    safeSet(videoFormat, "vendor.mtk.vdec.ultra-low-latency", 0);   // ULL off for stability
-                    safeSet(videoFormat, "vendor.mtk.vdec.disable-idle", 1);        // Prevent clock downscaling
-                    safeSet(videoFormat, "vendor.mtk.vdec.preload.frame.count", 1); // Light prebuffering
-
-                    // Queue / timeouts (moderate)
-                    safeSet(videoFormat, "vendor.mtk.vdec.buffer.fetch.timeout.ms", 4);
-                    safeSet(videoFormat, "vendor.mtk.vdec.bq.guard.interval.time", 4);
-                    safeSet(videoFormat, "vendor.mtk.vdec.input.max.queue.depth", 3);
-                    safeSet(videoFormat, "vendor.mtk.vdec.output.max.queue.depth", 3);
-
-                    // Pacing: controlled by the app
-                    safeSet(videoFormat, "vendor.mtk.vdec.vsync.adjust.enable", 0);
-
-                    // Skip/drop: only NVOP
-                    safeSet(videoFormat, "vendor.mtk.vdec.nvop.skip", 1);
-                    safeSet(videoFormat, "vendor.mtk.vdec.skip.mode", 0);
-                    safeSet(videoFormat, "vendor.mtk.vdec.drop.nonref.frame", 0);
-                    safeSet(videoFormat, "vendor.mtk.vdec.frame-drop.policy", 0);
-
-                    // Standard Android hints
-                    safeSet(videoFormat, MediaFormat.KEY_OPERATING_RATE, (int) Short.MAX_VALUE);
-                    safeSet(videoFormat, MediaFormat.KEY_PRIORITY, 0);
-                }
-                setNewOption = true;
-            }
-
-            else if (isDecoderInList(kirinDecoderPrefixes, decoderInfo.getName())) {
-                if (tryNumber < 4) {
-                    // Kirin low latency options
-                    // https://developer.huawei.com/consumer/cn/forum/topic/0202325564295980115
-                    videoFormat.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1);
-                    videoFormat.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-rdy", -1);
-                    setNewOption = true;
-                }
-            }
-            else if (isDecoderInList(exynosDecoderPrefixes, decoderInfo.getName())) {
-                if (tryNumber < 4) {
-                    // Exynos low latency option for H.264 decoder
-                    videoFormat.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1);
-                    setNewOption = true;
-                }
-            }
-            else if (isDecoderInList(amlogicDecoderPrefixes, decoderInfo.getName())) {
-                if (tryNumber < 4) {
-                    // Amlogic low latency vendor extension
-                    // https://github.com/codewalkerster/android_vendor_amlogic_common_prebuilt_libstagefrighthw/commit/41fefc4e035c476d58491324a5fe7666bfc2989e
-                    videoFormat.setInteger("vendor.low-latency.enable", 1);
-                    setNewOption = true;
-                }
             }
         }
 
@@ -1136,43 +994,7 @@ public class MediaCodecHelper {
 
     //derflacco
     public static void applyExtraVendorOptions(MediaFormat videoFormat, String decoderName) {
-        if (videoFormat == null || decoderName == null) return;
-
-        String mimeType = videoFormat.containsKey(MediaFormat.KEY_MIME) ? videoFormat.getString(MediaFormat.KEY_MIME) : null;
-        if ("video/hevc".equalsIgnoreCase(mimeType)) {
-            return;
-        }
-
-        // NVIDIA Tegra (Shield TV): enable generic low-latency + disable frame reordering
-        if (isNvidiaDecoder(decoderName)) {
-            safeSet(videoFormat, "media.low-latency.enable", 1);
-            safeSet(videoFormat, "vendor.low-latency.enable", 1); // fallback generic vendor key
-            safeSet(videoFormat, "disable-output-reorder", 1);
-            safeSet(videoFormat, "vendor.nvidia.disable-output-reorder", 1); // in case vendor namespace is required
-        }
-        // Qualcomm: ensure vendor low latency and frame-order tweaks
-        if (isQualcommDecoder(decoderName)) {
-            safeSet(videoFormat, "vendor.qti-ext-dec-low-latency.enable", 1);
-            safeSet(videoFormat, "vendor.qti-ext-dec-picture-order.enable", 0);
-            safeSet(videoFormat, "vendor.qti-ext-dec-frame-drop.enable", 1);
-        }
-
-        // Legacy Qualcomm OMX decoders: apply vendor keys + AOSP knobs
-        if (decoderName != null && decoderName.toLowerCase(java.util.Locale.US).startsWith("omx.qcom")) {
-            // Low latency & reordering off
-            safeSet(videoFormat, "vendor.qti-ext-dec-low-latency.enable", 1);
-            safeSet(videoFormat, "vendor.qti-ext-dec-picture-order.enable", 0);
-            safeSet(videoFormat, "vendor.qti-ext-dec-frame-drop.enable", 1);
-            // Reduce DPB output delay on older OMX stacks
-            safeSet(videoFormat, "vendor.qti-ext-dec-dpb-output-delay.enable", 0);
-            // Prefer IDR when possible
-            safeSet(videoFormat, "vendor.qti-ext-dec-picture-type.enable", 0); //ignored in logs
-            // Generic AOSP scheduling hints
-            try { videoFormat.setInteger(android.media.MediaFormat.KEY_OPERATING_RATE, (int)Short.MAX_VALUE); } catch (Throwable ignored) {}
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                try { videoFormat.setInteger(android.media.MediaFormat.KEY_PRIORITY, 0); } catch (Throwable ignored) {}
-            }
-        }
+        // Vendor extensions explicitly disabled
     }
 
 }
