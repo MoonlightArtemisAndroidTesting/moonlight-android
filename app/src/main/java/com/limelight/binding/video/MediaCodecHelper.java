@@ -488,21 +488,7 @@ public class MediaCodecHelper {
     }
 
     private static boolean decoderSupportsMaxOperatingRate(String decoderName) {
-        // Operate at maximum rate to lower latency as much as possible on
-        // some Qualcomm platforms. We could also set KEY_PRIORITY to 0 (realtime)
-        // but that will actually result in the decoder crashing if it can't satisfy
-        // our (ludicrous) operating rate requirement. This seems to cause reliable
-        // crashes on the Xiaomi Mi 10 lite 5G and Redmi K30i 5G on Android 10, so
-        // we'll disable it on Snapdragon 765G and all non-Qualcomm devices to be safe.
-        //
-        // NB: Even on Android 10, this optimization still provides significant
-        // performance gains on Pixel 2.
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-                (
-                        isDecoderInList(qualcommDecoderPrefixes, decoderName)
-                                || isDecoderInList(refFrameInvalidationHevcPrefixes, decoderName) ||
-                                isDecoderInList(refFrameInvalidationAvcPrefixes,  decoderName)
-                ) && !isAdreno620;
+        return false;
     }
 
     public static boolean setDecoderLowLatencyOptions(MediaFormat videoFormat, MediaCodecInfo decoderInfo, boolean ultraLowLatency, int tryNumber) {
