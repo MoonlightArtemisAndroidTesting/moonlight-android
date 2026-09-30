@@ -1989,7 +1989,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     }
 
                     // Some devices throw errors if maxDecFrameBuffering < numRefFrames
-                    sps.vuiParams.bitstreamRestriction.maxDecFrameBuffering = sps.numRefFrames;
+                    sps.vuiParams.bitstreamRestriction.maxDecFrameBuffering = 1;
 
                     // These values are the defaults for the fields, but they are more aggressive
                     // than what GFE sends in 2.5.11, but it doesn't seem to cause picture problems.
