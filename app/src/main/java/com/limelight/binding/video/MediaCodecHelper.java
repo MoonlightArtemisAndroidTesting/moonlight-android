@@ -724,24 +724,7 @@ public class MediaCodecHelper {
     }
 
     public static boolean decoderSupportsAdaptivePlayback(MediaCodecInfo decoderInfo, String mimeType) {
-        if (isDecoderInList(blacklistedAdaptivePlaybackPrefixes, decoderInfo.getName())) {
-            LimeLog.info("Decoder blacklisted for adaptive playback");
-            return false;
-        }
-
-        try {
-            if (decoderInfo.getCapabilitiesForType(mimeType).
-                    isFeatureSupported(CodecCapabilities.FEATURE_AdaptivePlayback))
-            {
-                // This will make getCapabilities() return that adaptive playback is supported
-                LimeLog.info("Adaptive playback supported (FEATURE_AdaptivePlayback)");
-                return true;
-            }
-        } catch (Exception e) {
-            // Tolerate buggy codecs
-            e.printStackTrace();
-        }
-
+        LimeLog.info("Adaptive playback explicitly disabled");
         return false;
     }
 
