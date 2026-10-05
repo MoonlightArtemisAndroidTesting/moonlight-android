@@ -67,7 +67,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private void releaseWithPolicy(int bufferIndex, long frameTimeNanos) {
         try {
             long now = System.nanoTime();
-            boolean immediate = preferLowerDelays && (frameTimeNanos <= now + 300_000L);
+            boolean immediate = isC2AmlogicHevcDecoder || (preferLowerDelays && (frameTimeNanos <= now + 300_000L));
             if (immediate) {
                 videoDecoder.releaseOutputBuffer(bufferIndex, true);
             } else {
@@ -124,6 +124,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private MediaCodec videoDecoder;
     private Thread rendererThread;
     private boolean needsSpsBitstreamFixup, isExynos4;
+    private boolean isC2AmlogicHevcDecoder;
     private boolean adaptivePlayback, directSubmit, fusedIdrFrame;
     private boolean constrainedHighProfile;
     private boolean refFrameInvalidationAvc, refFrameInvalidationHevc, refFrameInvalidationAv1;
@@ -752,6 +753,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
         adaptivePlayback = MediaCodecHelper.decoderSupportsAdaptivePlayback(selectedDecoderInfo, mimeType);
         fusedIdrFrame = MediaCodecHelper.decoderSupportsFusedIdrFrame(selectedDecoderInfo, mimeType);
+        isC2AmlogicHevcDecoder = selectedDecoderInfo != null &&
+                selectedDecoderInfo.getName() != null &&
+                "c2.amlogic.hevc.decoder".equalsIgnoreCase(selectedDecoderInfo.getName());
 
         for (int tryNumber = 0;; tryNumber++) {
             LimeLog.info("Decoder configuration try: "+tryNumber);
@@ -1090,8 +1094,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             if (nextOutputBuffer != null) {
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        if (preferLowerDelays) {
-                            // ULL: present at next VSYNC (no scheduling)
+                        if (preferLowerDelays || isC2AmlogicHevcDecoder) {
+                            // ULL / c2.amlogic.hevc.decoder: present at next VSYNC (no scheduling)
                             releaseWithPolicy(nextOutputBuffer, System.nanoTime());} else {
                             // Smooth/Balanced: keep timestamp scheduling
                             videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
@@ -1320,8 +1324,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                             continue;
                                         }
 
-                                        if (preferLowerDelays) {
-                                            // ULL: present at next VSYNC (no scheduling)
+                                        if (preferLowerDelays || isC2AmlogicHevcDecoder) {
+                                            // ULL / c2.amlogic.hevc.decoder: present immediately
                                             releaseWithPolicy(lastIndex, System.nanoTime());} else {
                                             // Smooth/Balanced: keep timestamp scheduling
                                             videoDecoder.releaseOutputBuffer(lastIndex, nowNs);
@@ -1393,8 +1397,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                             continue; // niente stats sui frame droppati
                                         }
 
-                                        if (preferLowerDelays) {
-                                            // ULL: present at next VSYNC (no scheduling)
+                                        if (preferLowerDelays || isC2AmlogicHevcDecoder) {
+                                            // ULL / c2.amlogic.hevc.decoder: present immediately
                                             releaseWithPolicy(lastIndex, System.nanoTime());} else {
                                             // Smooth/Balanced: keep timestamp scheduling
                                             videoDecoder.releaseOutputBuffer(lastIndex, nowNs);
