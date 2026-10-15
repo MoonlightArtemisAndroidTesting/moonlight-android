@@ -49,6 +49,7 @@ public class MediaCodecHelper {
     private static final List<String> knownVendorLowLatencyOptions;
 
     private static final String AMLOGIC_C2_HEVC_DECODER_PREFIX = "c2.amlogic.hevc";
+    private static final String AMLOGIC_C2_DECODER_PREFIX = "c2.amlogic";
 
     public static final boolean SHOULD_BYPASS_SOFTWARE_BLOCK =
             Build.HARDWARE.equals("ranchu") || Build.HARDWARE.equals("cheets") || Build.BRAND.equals("Android-x86");
@@ -468,6 +469,16 @@ public class MediaCodecHelper {
     // renderer must watch for it.
     public static boolean decoderNeedsOutputStallWatchdog(MediaCodecInfo decoderInfo) {
         return decoderInfo != null && isAmlogicC2HevcDecoder(decoderInfo.getName());
+    }
+
+    // AV1 on Amlogic C2 decoders uses forced GPU composition (from sven253's Artemis fork): the
+    // compositor is kept busy every frame so the video layer stays under GPU composition instead
+    // of being handed straight to the display hardware, which causes frame sync problems.
+    public static boolean decoderNeedsForcedGpuComposition(MediaCodecInfo decoderInfo, String mimeType) {
+        return decoderInfo != null &&
+                MediaFormat.MIMETYPE_VIDEO_AV1.equalsIgnoreCase(mimeType) &&
+                decoderInfo.getName().regionMatches(true, 0, AMLOGIC_C2_DECODER_PREFIX, 0,
+                        AMLOGIC_C2_DECODER_PREFIX.length());
     }
 
     private static boolean isDecoderInList(List<String> decoderList, String decoderName) {

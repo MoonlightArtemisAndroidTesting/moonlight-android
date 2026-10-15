@@ -36,6 +36,24 @@
 <!--        app:aperture_middle_color="#6CD2F8">-->
 <!--    </com.limelight.ui.ApertureViewGroup>-->
 
+    <!-- Mutated every frame to force GPU composition, see Game.forceGpuCompositionTick -->
+    <TextView
+        android:id="@+id/forceGpuComposition"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="1dp"
+        android:layout_marginStart="1dp"
+        android:layout_marginTop="1dp"
+        android:layout_gravity="left"
+        android:textSize="1sp"
+        android:background="@android:color/transparent"
+        android:paddingLeft="1dp"
+        android:paddingRight="1dp"
+        android:paddingTop="1dp"
+        android:paddingBottom="1dp"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/notificationOverlay"
         android:layout_width="wrap_content"

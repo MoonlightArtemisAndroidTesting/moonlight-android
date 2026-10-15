@@ -85,6 +85,8 @@ import android.os.PersistableBundle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Rational;
+import android.os.SystemClock;
+import android.view.Choreographer;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -230,6 +232,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
     private TextView performanceOverlayBig;
 
+    private TextView forceGpuCompositionView;
+    private boolean gpuCompositionToggle;
+    private boolean gpuCompositionTickerRunning;
+    private long gpuCompositionTickCounter;
+    private long lastGpuCompositionLogTimeMs;
+
     private MediaCodecDecoderRenderer decoderRenderer;
     private boolean reportedCrash;
 
@@ -336,6 +344,81 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             MoonBridge.sendEmptyPayload();
         }
     };
+
+    // Some Android TV devices drop out of GPU composition and hand the video layer straight
+    // to the display hardware, which can cause frame sync problems. Mutating a tiny overlay
+    // every frame keeps the compositor busy and the video layer under GPU composition.
+    // Enabled automatically for decoders that need it, see
+    // MediaCodecHelper.decoderNeedsForcedGpuComposition().
+    private final Choreographer.FrameCallback forceGpuCompositionTick = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            if (!gpuCompositionTickerRunning || forceGpuCompositionView == null) {
+                return;
+            }
+
+            gpuCompositionToggle = !gpuCompositionToggle;
+            forceGpuCompositionView.setText(gpuCompositionToggle ? "·" : ".");
+            forceGpuCompositionView.setAlpha(gpuCompositionToggle ? 0.99f : 1.0f);
+            forceGpuCompositionView.invalidate();
+
+            gpuCompositionTickCounter++;
+            if (decoderRenderer != null) {
+                decoderRenderer.onForcedGpuCompositionTick();
+            }
+            long now = SystemClock.uptimeMillis();
+            if (now - lastGpuCompositionLogTimeMs >= 5000) {
+                LimeLog.info("Force GPU composition tick active: " + gpuCompositionTickCounter + " frames");
+                lastGpuCompositionLogTimeMs = now;
+            }
+
+            Choreographer.getInstance().postFrameCallback(this);
+        }
+    };
+
+    private void updateGpuCompositionTickerState() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    updateGpuCompositionTickerState();
+                }
+            });
+            return;
+        }
+
+        boolean shouldRun = connected &&
+                !isHidingOverlays &&
+                decoderRenderer != null &&
+                decoderRenderer.isForcedGpuCompositionNeeded() &&
+                forceGpuCompositionView != null;
+
+        if (shouldRun) {
+            if (!gpuCompositionTickerRunning) {
+                LimeLog.info("Forcing GPU composition for this stream");
+                gpuCompositionTickerRunning = true;
+                gpuCompositionTickCounter = 0;
+                lastGpuCompositionLogTimeMs = SystemClock.uptimeMillis();
+                forceGpuCompositionView.setVisibility(View.VISIBLE);
+                decoderRenderer.setForcedGpuCompositionActive(true);
+                Choreographer.getInstance().postFrameCallback(forceGpuCompositionTick);
+            }
+        }
+        else {
+            stopGpuCompositionTicker();
+        }
+    }
+
+    private void stopGpuCompositionTicker() {
+        gpuCompositionTickerRunning = false;
+        Choreographer.getInstance().removeFrameCallback(forceGpuCompositionTick);
+        if (forceGpuCompositionView != null) {
+            forceGpuCompositionView.setVisibility(View.GONE);
+        }
+        if (decoderRenderer != null) {
+            decoderRenderer.setForcedGpuCompositionActive(false);
+        }
+    }
 
     @SuppressLint({"MissingInflatedId", "ClickableViewAccessibility"})
     @Override
@@ -522,6 +605,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         performanceOverlayLite = findViewById(R.id.performanceOverlayLite);
 
         performanceOverlayBig = findViewById(R.id.performanceOverlayBig);
+
+        forceGpuCompositionView = findViewById(R.id.forceGpuComposition);
 
         inputCaptureProvider = InputCaptureManager.getInputCaptureProvider(this, this);
 
@@ -1237,6 +1322,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
                 performanceOverlayView.setVisibility(View.GONE);
                 notificationOverlayView.setVisibility(View.GONE);
+                updateGpuCompositionTickerState();
 
                 // Disable sensors while in PiP mode
                 controllerHandler.disableSensors();
@@ -1274,6 +1360,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 }
 
                 notificationOverlayView.setVisibility(requestedNotificationOverlayVisibility);
+                updateGpuCompositionTickerState();
 
                 // Enable sensors again after exiting PiP
                 controllerHandler.enableSensors();
@@ -1705,6 +1792,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         instance = null;
         timerHandler.removeCallbacksAndMessages(null);
 
+        stopGpuCompositionTicker();
+
         if (prefConfig.enableFullExDisplay) handleDisplayRemoved();
 
         if (controllerHandler != null) {
@@ -1760,6 +1849,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     @Override
     protected void onStop() {
         super.onStop();
+
+        stopGpuCompositionTicker();
 
         SpinnerDialog.closeDialogs(this);
         Dialog.closeDialogs();
@@ -3455,6 +3546,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         if (connecting || connected) {
             connecting = connected = false;
             updatePipAutoEnter();
+            updateGpuCompositionTickerState();
 
             controllerHandler.stop();
 
@@ -3686,6 +3778,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 connected = true;
                 connecting = false;
                 updatePipAutoEnter();
+                updateGpuCompositionTickerState();
 
                 // Hide the mouse cursor now after a short delay.
                 // Doing it before dismissing the spinner seems to be undone

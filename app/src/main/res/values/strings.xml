@@ -134,6 +134,7 @@
     <string name="perf_overlay_netlatency">Average network latency: %1$d ms (variance: %2$d ms)</string>
     <string name="perf_overlay_dectime">Average decoding time: %1$.2f ms</string>
     <string name="perf_overlay_stall_recoveries">Decoder stall recoveries: %1$d (last freeze: %2$d ms)</string>
+    <string name="perf_overlay_forced_gpu_composition">Forced GPU composition: on (%1$d ticks/s)</string>
     <string name="perf_overlay_drawdelay"> Delay: %1$.2f ms</string>
 
     <!-- Performance Report Sharing -->

@@ -210,6 +210,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private static final int STALL_STAGE_RESTART = 3;
     private static final int STALL_STAGE_RESET = 4;
     private boolean outputStallWatchdogEnabled;
+    // Written during decoder setup on a native thread, read by Game on the UI thread
+    private volatile boolean forcedGpuCompositionNeeded;
+    // Written by Game's GPU composition ticker on the UI thread, read for the perf overlay
+    private volatile boolean forcedGpuCompositionActive;
+    private volatile long forcedGpuCompositionTicks;
+    private long lastGpuCompositionOverlayTicks;
+    private long lastGpuCompositionOverlayTimeMs;
     // Written by the renderer thread, read by the input thread
     private volatile long lastDecoderOutputNs;
     // Input thread only
@@ -505,6 +512,21 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         return false;
     }
 
+    // Valid once the decoder has been set up for the stream (before connectionStarted())
+    public boolean isForcedGpuCompositionNeeded() {
+        return forcedGpuCompositionNeeded;
+    }
+
+    public void setForcedGpuCompositionActive(boolean active) {
+        forcedGpuCompositionActive = active;
+    }
+
+    // UI thread only (single writer), so the non-atomic increment is safe
+    @SuppressWarnings("NonAtomicOperationOnVolatileField")
+    public void onForcedGpuCompositionTick() {
+        forcedGpuCompositionTicks++;
+    }
+
     public boolean isAv1Supported() {
         return av1Decoder != null;
     }
@@ -781,6 +803,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
         adaptivePlayback = MediaCodecHelper.decoderSupportsAdaptivePlayback(selectedDecoderInfo, mimeType);
         fusedIdrFrame = MediaCodecHelper.decoderSupportsFusedIdrFrame(selectedDecoderInfo, mimeType);
+        forcedGpuCompositionNeeded = MediaCodecHelper.decoderNeedsForcedGpuComposition(selectedDecoderInfo, mimeType);
+        if (forcedGpuCompositionNeeded) {
+            LimeLog.info("Forced GPU composition needed for "+selectedDecoderInfo.getName());
+        }
         outputStallWatchdogEnabled = MediaCodecHelper.decoderNeedsOutputStallWatchdog(selectedDecoderInfo);
         if (outputStallWatchdogEnabled) {
             LimeLog.info("Output stall watchdog enabled for "+selectedDecoderInfo.getName());
@@ -1998,17 +2024,26 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 (float)lastTwo.totalHostProcessingLatency / 10 / lastTwo.framesWithHostProcessingLatency)).append('\n');
                     }
                     sb.append(context.getString(R.string.perf_overlay_dectime, decodeTimeMs));
-                    if (outputStallWatchdogEnabled) {
-                        sb.append('\n');
-                    }
                 }
+                // Device workaround status, each on its own line (tab separated in the lite overlay)
+                String workaroundSeparator = prefs.enablePerfOverlayLite ? "\t" : "\n";
                 if (outputStallWatchdogEnabled) {
-                    if (prefs.enablePerfOverlayLite) {
-                        sb.append('\t');
-                    }
+                    sb.append(workaroundSeparator);
                     sb.append(context.getString(R.string.perf_overlay_stall_recoveries,
                             stallRecoveryCount, lastStallFreezeMs));
                 }
+                long gpuCompositionTicks = forcedGpuCompositionTicks;
+                long gpuCompositionNowMs = SystemClock.uptimeMillis();
+                if (forcedGpuCompositionActive) {
+                    // Should match the display refresh rate if the ticker is running properly
+                    long elapsedMs = gpuCompositionNowMs - lastGpuCompositionOverlayTimeMs;
+                    int ticksPerSec = elapsedMs > 0 ?
+                            (int) ((gpuCompositionTicks - lastGpuCompositionOverlayTicks) * 1000 / elapsedMs) : 0;
+                    sb.append(workaroundSeparator);
+                    sb.append(context.getString(R.string.perf_overlay_forced_gpu_composition, ticksPerSec));
+                }
+                lastGpuCompositionOverlayTicks = gpuCompositionTicks;
+                lastGpuCompositionOverlayTimeMs = gpuCompositionNowMs;
                 String fullLog = sb.toString();
                 if(prefs.enablePerfOverlay) {
                     perfListener.onPerfUpdate(fullLog);
