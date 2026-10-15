@@ -194,6 +194,35 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int numFramesIn;
     private int numFramesOut;
 
+    // Output stall watchdog, see MediaCodecHelper.decoderNeedsOutputStallWatchdog(). A stall is
+    // declared once STALL_MIN_FRAMES frames have been queued without any output and the oldest of
+    // them has waited STALL_MIN_NS. Each consecutive stall escalates one stage: IDR only, then
+    // flush, then restart, then reset. Every stage requests an IDR frame, which is what clears
+    // the stall. Decode time on affected devices is ~5-11 ms, so a frame left unanswered for
+    // 50 ms is far outside normal behavior, while the frozen picture stays bounded to about
+    // 66 ms at 60 FPS plus the IDR round trip.
+    private static final int STALL_MIN_FRAMES = 3;
+    private static final long STALL_MIN_NS = 50_000_000L;
+    private static final long STALL_POST_RECOVERY_NS = 200_000_000L;
+    private static final int STALL_STAGE_NONE = 0;
+    private static final int STALL_STAGE_IDR = 1;
+    private static final int STALL_STAGE_FLUSH = 2;
+    private static final int STALL_STAGE_RESTART = 3;
+    private static final int STALL_STAGE_RESET = 4;
+    private boolean outputStallWatchdogEnabled;
+    // Written by the renderer thread, read by the input thread
+    private volatile long lastDecoderOutputNs;
+    // Input thread only
+    private long stallLastSeenOutputNs;
+    private long stallWindowStartNs;
+    private long stallFirstDetectedNs;
+    private int stallFramesIn;
+    private int stallLastFrameNumber;
+    private int stallStage = STALL_STAGE_NONE;
+    private boolean stallAwaitingIdr;
+    private int stallRecoveryCount;
+    private int lastStallFreezeMs;
+
     private int targetFps = 0;
 
     private MediaCodecInfo findAvcDecoder() {
@@ -752,6 +781,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
         adaptivePlayback = MediaCodecHelper.decoderSupportsAdaptivePlayback(selectedDecoderInfo, mimeType);
         fusedIdrFrame = MediaCodecHelper.decoderSupportsFusedIdrFrame(selectedDecoderInfo, mimeType);
+        outputStallWatchdogEnabled = MediaCodecHelper.decoderNeedsOutputStallWatchdog(selectedDecoderInfo);
+        if (outputStallWatchdogEnabled) {
+            LimeLog.info("Output stall watchdog enabled for "+selectedDecoderInfo.getName());
+        }
 
         for (int tryNumber = 0;; tryNumber++) {
             LimeLog.info("Decoder configuration try: "+tryNumber);
@@ -1207,7 +1240,6 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 double ewmaJitterNs            = periodNs * 0.1;
 
                 BufferInfo info = new BufferInfo();
-                long lastOutputNs = System.nanoTime();
                 while (!stopping) {
                     /* LATEST_ONLY_LOW_LATENCY */
                     if (!preferLowerDelays) {
@@ -1229,6 +1261,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
                             if (__last >= 0) {
                                 long __nowNs = System.nanoTime();
+                                lastDecoderOutputNs = __nowNs;
                                 if (android.os.Build.VERSION.SDK_INT >= 21) {
                                     releaseWithPolicy(__last, System.nanoTime());} else {
                                     releaseWithPolicy(__last, System.nanoTime());}
@@ -1240,6 +1273,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     try { updateDecodeLatencyStats(__lastPtsUs); } catch (Throwable ignored) {}
                                 }
 
+                                // The continue skips the recovery check in the finally block below,
+                                // so a recovery requested by the input thread would wait on us.
+                                doCodecRecoveryIfRequired(CR_FLAG_RENDER_THREAD);
                                 continue; // handled this iteration
                             }
                         } catch (Throwable ignored) {}
@@ -1261,6 +1297,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         }
 
                         if (outIndex >= 0) {
+                            lastDecoderOutputNs = System.nanoTime();
+
                             // --- flags per gestire le statistiche in modo robusto ---
                             boolean statsUpdated = false;
                             boolean frameDropped = false;
@@ -1475,23 +1513,6 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         doCodecRecoveryIfRequired(CR_FLAG_RENDER_THREAD);
                     }
                 }
-
-                /* WATCHDOG_C2_SLEEP */
-                try {
-                    final long __nowNs = System.nanoTime();
-                    if (__nowNs - lastOutputNs > 1_200_000_000L) { // ~1.2s without output → likely C2 sleep
-                        LimeLog.warning("Decoder watchdog: no output >1.2s, flushing codec to recover...");
-                        try {
-                            videoDecoder.flush();
-                        } catch (Throwable ignored) {}
-                        try {
-                            android.os.Bundle __poke = new android.os.Bundle();
-                            __poke.putInt("priority", 0);
-                            videoDecoder.setParameters(__poke);
-                        } catch (Throwable ignored) {}
-                        lastOutputNs = __nowNs;
-                    }
-                } catch (Throwable ignored) {}
             }
         };
         rendererThread.setName("Video - Renderer (MediaCodec)");
@@ -1508,11 +1529,23 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
 
         startTime = SystemClock.uptimeMillis();
+        long outputNsAtStart = lastDecoderOutputNs;
 
         try {
             // If we don't have an input buffer index yet, fetch one now
             while (nextInputBufferIndex < 0 && !stopping) {
                 nextInputBufferIndex = videoDecoder.dequeueInputBuffer(10000);
+
+                // A stalled decoder may also stop returning input buffers. Don't wait here
+                // forever, since that would also block the stall check in submitDecodeUnit().
+                // Only act if the decoder produced nothing at all while we waited.
+                if (nextInputBufferIndex < 0 && outputStallWatchdogEnabled &&
+                        SystemClock.uptimeMillis() - startTime >= STALL_MIN_NS / 1_000_000L &&
+                        refreshOutputStallWindow() && stallLastSeenOutputNs == outputNsAtStart) {
+                    LimeLog.warning("Output stall watchdog: decoder stopped returning input buffers");
+                    beginOutputStallRecovery(STALL_STAGE_FLUSH);
+                    break;
+                }
             }
 
             // Get the backing ByteBuffer for the input buffer index
@@ -1740,6 +1773,97 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
     }
 
+    // Input thread only. Restarts the stall window if the decoder has produced output since the
+    // last call. Returns false if the decoder hasn't produced any output yet.
+    private boolean refreshOutputStallWindow() {
+        long outputNs = lastDecoderOutputNs;
+        if (outputNs == 0) {
+            // No output yet. Startup hangs are reported by DecoderHungException instead.
+            return false;
+        }
+
+        if (outputNs != stallLastSeenOutputNs) {
+            // Output has advanced since we last looked, so any stall is over
+            if (stallStage != STALL_STAGE_NONE) {
+                lastStallFreezeMs = (int) ((outputNs - stallFirstDetectedNs) / 1_000_000L);
+                LimeLog.warning("Output stall watchdog: output resumed after "+
+                        lastStallFreezeMs+" ms at stage "+stallStage);
+            }
+            stallLastSeenOutputNs = outputNs;
+            stallFramesIn = 0;
+            stallStage = STALL_STAGE_NONE;
+            stallAwaitingIdr = false;
+        }
+        return true;
+    }
+
+    // Input thread only. Escalates to the next recovery stage (at least minStage). The caller must
+    // make submitDecodeUnit() return DR_NEED_IDR, since every stage needs an IDR frame to finish.
+    private void beginOutputStallRecovery(int minStage) {
+        long nowNs = System.nanoTime();
+        if (stallStage == STALL_STAGE_NONE) {
+            // Measure the freeze from the last frame the decoder produced
+            stallFirstDetectedNs = stallLastSeenOutputNs;
+            stallRecoveryCount++;
+        }
+        stallStage = Math.min(Math.max(stallStage + 1, minStage), STALL_STAGE_RESET);
+        stallAwaitingIdr = true;
+        stallFramesIn = 0;
+
+        LimeLog.warning("Output stall watchdog: no output for "+
+                (nowNs - stallLastSeenOutputNs) / 1_000_000L+" ms, recovery stage "+stallStage);
+
+        // Stages map directly onto the codec recovery types (IDR only = none, flush, restart, reset)
+        int recoveryType = stallStage - 1;
+        if (recoveryType != CR_RECOVERY_TYPE_NONE) {
+            codecRecoveryType.compareAndSet(CR_RECOVERY_TYPE_NONE, recoveryType);
+        }
+    }
+
+    // Input thread only. Called after each frame is queued. Returns true if submitDecodeUnit()
+    // must return DR_NEED_IDR to recover from an output stall.
+    private boolean checkOutputStall(int frameNumber, int frameType) {
+        long nowNs = System.nanoTime();
+
+        // Refresh before counting, so this frame counts toward the window after the latest output
+        if (!refreshOutputStallWindow()) {
+            return false;
+        }
+
+        // Multi-slice IDR frames are submitted once per slice, so count distinct frames
+        if (frameNumber != stallLastFrameNumber) {
+            stallLastFrameNumber = frameNumber;
+            if (stallAwaitingIdr) {
+                if (frameType != MoonBridge.FRAME_TYPE_IDR) {
+                    // Frames queued before the IDR frame that recovers us don't count
+                    return false;
+                }
+                stallAwaitingIdr = false;
+            }
+
+            // The window starts when the decoder is handed its oldest unanswered frame, not at
+            // the last output. Otherwise a burst of frames arriving after a network gap looks
+            // like a stall before the decoder has had time to work on them.
+            if (stallFramesIn == 0) {
+                stallWindowStartNs = nowNs;
+            }
+            stallFramesIn++;
+        }
+
+        // A flushed, restarted, or reset decoder can take longer to produce its first frame
+        long stallTimeoutNs = stallStage == STALL_STAGE_NONE ? STALL_MIN_NS : STALL_POST_RECOVERY_NS;
+        if (stallAwaitingIdr || stallFramesIn < STALL_MIN_FRAMES ||
+                nowNs - stallWindowStartNs < stallTimeoutNs) {
+            return false;
+        }
+
+        beginOutputStallRecovery(STALL_STAGE_IDR);
+
+        // Perform any flush/restart/reset now so the IDR frame lands on a clean decoder
+        doCodecRecoveryIfRequired(CR_FLAG_INPUT_THREAD);
+        return true;
+    }
+
     @SuppressWarnings("deprecation")
     @Override
     public int submitDecodeUnit(byte[] decodeUnitData, int decodeUnitLength, int decodeUnitType,
@@ -1874,6 +1998,16 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 (float)lastTwo.totalHostProcessingLatency / 10 / lastTwo.framesWithHostProcessingLatency)).append('\n');
                     }
                     sb.append(context.getString(R.string.perf_overlay_dectime, decodeTimeMs));
+                    if (outputStallWatchdogEnabled) {
+                        sb.append('\n');
+                    }
+                }
+                if (outputStallWatchdogEnabled) {
+                    if (prefs.enablePerfOverlayLite) {
+                        sb.append('\t');
+                    }
+                    sb.append(context.getString(R.string.perf_overlay_stall_recoveries,
+                            stallRecoveryCount, lastStallFreezeMs));
                 }
                 String fullLog = sb.toString();
                 if(prefs.enablePerfOverlay) {
@@ -2170,6 +2304,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         nextInputBuffer.put(decodeUnitData, 0, decodeUnitLength);
 
         if (!queueNextInputBuffer(timestampUs, codecFlags)) {
+            return MoonBridge.DR_NEED_IDR;
+        }
+
+        if (outputStallWatchdogEnabled && checkOutputStall(frameNumber, frameType)) {
             return MoonBridge.DR_NEED_IDR;
         }
 

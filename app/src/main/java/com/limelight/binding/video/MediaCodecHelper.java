@@ -462,6 +462,14 @@ public class MediaCodecHelper {
                 AMLOGIC_C2_HEVC_DECODER_PREFIX.length());
     }
 
+    // Even with HEVC RFI off, the Amlogic C2 HEVC decoder occasionally enters an error storm
+    // (kernel "[h265] ... set error_mark" on every frame) where it keeps accepting input but
+    // produces no output until it is given a new IDR frame. Nothing else notices this, so the
+    // renderer must watch for it.
+    public static boolean decoderNeedsOutputStallWatchdog(MediaCodecInfo decoderInfo) {
+        return decoderInfo != null && isAmlogicC2HevcDecoder(decoderInfo.getName());
+    }
+
     private static boolean isDecoderInList(List<String> decoderList, String decoderName) {
         if (!initialized) {
             throw new IllegalStateException("MediaCodecHelper must be initialized before use");
