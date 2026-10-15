@@ -11,6 +11,66 @@ Artemis is currently the best fork of Moonlight with loads of optimizations for 
 
 A more seamless experience with virtual display will be Artemis paired with [Apollo](https://github.com/ClassicOldSong/Apollo).
 
+# About this fork: Amlogic TV box fixes
+
+This fork of Artemis fixes streaming on Android TV boxes and sticks that use Amlogic's Codec2
+decoders (`c2.amlogic.*`). Affected devices include the Onn 4K Pro V2, Xiaomi TV Box S 3rd Gen,
+Xiaomi TV Stick 4K 2nd Gen, Ugoos AM9 (S905X5 / S905X5M) and Xiaomi TV Stick MiTV-AYFR0 (S905Y4).
+Every change applies only when one of these decoders is in use, so other devices behave exactly
+as they do in Artemis.
+
+This fork has been tested on an Onn 4K Pro V2. The HEVC changes were also tested on a Xiaomi TV
+Box S 3rd Gen in their original author's build
+([ClassicOldSong/moonlight-android#603](https://github.com/ClassicOldSong/moonlight-android/pull/603)).
+
+## HEVC plays smoothly instead of as a slideshow
+
+`c2.amlogic.hevc.decoder` reports support for Android's low-latency mode, but when that mode is
+turned on it decodes every frame and shows only a few per second. This fork skips Android's
+low-latency option (`KEY_LOW_LATENCY`) for this decoder and uses Amlogic's own low-latency options
+(`vdec-lowlatency`, `vendor.low-latency.enable`) instead. See
+[moonlight-android#1504](https://github.com/moonlight-stream/moonlight-android/issues/1504) and
+[#1584](https://github.com/moonlight-stream/moonlight-android/issues/1584).
+
+## Fewer HEVC decoder errors
+
+With HEVC reference frame invalidation (RFI) on, the decoder hits bursts of errored frames every
+few minutes. RFI is now off for this decoder, and lost frames are recovered with keyframes instead.
+This makes the error bursts much rarer, but it doesn't stop them completely.
+
+The bundled `moonlight-common-c` includes three fixes for streaming with RFI off. Without them, a
+single out-of-order packet could freeze the video for about 2 seconds and show a "Slow connection"
+warning ([moonlight-common-c#147](https://github.com/moonlight-stream/moonlight-common-c/pull/147)).
+
+## HEVC hangs recover automatically
+
+Occasionally the HEVC decoder still gets stuck. It keeps taking in video but shows nothing, and in
+Artemis the picture stays frozen until you restart the stream. This fork watches for that: if 3
+frames go into the decoder and nothing comes out for 50 ms, it asks the PC for a fresh keyframe,
+which clears the error. If the decoder stays stuck, it is flushed, then restarted, then reset. A
+hang now shows up as a brief stutter.
+
+With the performance overlay on, the line `Decoder stall recoveries: N (last freeze: X ms)` shows
+how many hangs were caught and how long the most recent freeze lasted.
+
+## Forced GPU composition for AV1
+
+When streaming AV1 on a `c2.amlogic` decoder, the app keeps Android's compositor busy every frame
+so the video stays under GPU composition instead of being sent straight to the display hardware.
+This uses the "Force GPU composition" technique from
+[sven253's fork](https://github.com/sven253/artemis-moonlight-android-hevc-fix), but turns on
+automatically instead of through a setting. The performance overlay shows
+`Forced GPU composition: on (N ticks/s)` while it's active. The tick rate should roughly match your
+display's refresh rate. This change hasn't been tested on hardware yet.
+
+## Debug builds no longer drop packets on purpose
+
+Debug builds used to compile the streaming library in a test mode that deliberately drops one
+packet from every error-correction block, so the packet loss figure and "Slow connection" warnings
+in debug builds were not real. That mode also left the native code unoptimized. Debug builds now
+compile native code with release settings (also from sven253's fork), so they stream like release
+builds. They still install as a separate app called "Diana".
+
 # Features
 
 If you switch back to the main stream version, you'll be missing the following awesome features which are very unlikely to be added there:
@@ -64,8 +124,15 @@ The main repo had stayed silent for 5 months, with nobody actually responding to
 **Update**: They have contacted me and apologized for this incident, but the fact it **happened** still motivated me to start my own fork.
 
 ## Downloads
-* [Download APK directly](https://github.com/ClassicOldSong/moonlight-android/releases)
-* [Use Obtainium](https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22com.limelight.noir%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2FClassicOldSong%2Fmoonlight-android%22%2C%22author%22%3A%22ClassicOldSong%22%2C%22name%22%3A%22Artemis%22%2C%22additionalSettings%22%3A%22%7B%5C%22apkFilterRegEx%5C%22%3A%5C%22nonRoot%5C%22%2C%5C%22matchGroutToUse%5C%22%3A%5C%22%241%5C%22%2C%5C%22versionExtractionRegEx%5C%22%3A%5C%22v(.%2B)%5C%22%7D%22%7D) (recommended)
+* [Download the APK for this fork](https://github.com/MoonlightArtemisAndroidTesting/moonlight-android/releases/tag/ForceGPU%2BWatchdog) (pre-release: force GPU composition + stall watchdog)
+
+Pick the APK that matches your device's Android build: `arm64-v8a` for 64-bit Android, or
+`armeabi-v7a` for 32-bit. Many Amlogic boxes run a 32-bit Android image even though their chip is
+64-bit, so if the `arm64-v8a` APK won't install, use `armeabi-v7a`. These are debug builds: they
+install as a separate app called "Diana", so they won't replace an existing Artemis install.
+
+For the official Artemis builds without these fixes, see
+[ClassicOldSong's releases](https://github.com/ClassicOldSong/moonlight-android/releases).
 
 ## Building
 * Install Android Studio and the Android NDK
