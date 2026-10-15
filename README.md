@@ -61,7 +61,7 @@ This uses the "Force GPU composition" technique from
 [sven253's fork](https://github.com/sven253/artemis-moonlight-android-hevc-fix), but turns on
 automatically instead of through a setting. The performance overlay shows
 `Forced GPU composition: on (N ticks/s)` while it's active. The tick rate should roughly match your
-display's refresh rate. This change hasn't been tested on hardware yet.
+display's refresh rate. Tested working on an Onn 4k Pro V2.
 
 ## Debug builds no longer drop packets on purpose
 
