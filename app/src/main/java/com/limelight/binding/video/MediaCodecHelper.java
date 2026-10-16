@@ -471,6 +471,18 @@ public class MediaCodecHelper {
         return decoderInfo != null && isAmlogicC2HevcDecoder(decoderInfo.getName());
     }
 
+    // Even with every workaround in place, the Amlogic C2 HEVC decoder still hangs every so often
+    // (see decoderNeedsOutputStallWatchdog()). When the device also has an Amlogic C2 hardware AV1
+    // decoder, offer AV1 in Auto mode so it is used instead. The host picks AV1 over HEVC when the
+    // client offers both, and falls back to HEVC on its own if it can't encode AV1.
+    public static boolean shouldPreferAv1OverHevc(MediaCodecInfo hevcDecoderInfo, MediaCodecInfo av1DecoderInfo) {
+        return hevcDecoderInfo != null && av1DecoderInfo != null &&
+                isAmlogicC2HevcDecoder(hevcDecoderInfo.getName()) &&
+                av1DecoderInfo.getName().regionMatches(true, 0, AMLOGIC_C2_DECODER_PREFIX, 0,
+                        AMLOGIC_C2_DECODER_PREFIX.length()) &&
+                isDecoderWhitelistedForAv1(av1DecoderInfo);
+    }
+
     // AV1 on Amlogic C2 decoders uses forced GPU composition (from sven253's Artemis fork): the
     // compositor is kept busy every frame so the video layer stays under GPU composition instead
     // of being handed straight to the display hardware, which causes frame sync problems.

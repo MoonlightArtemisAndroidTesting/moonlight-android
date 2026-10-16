@@ -362,8 +362,24 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         return hevcDecoderInfo;
     }
 
-    private MediaCodecInfo findAv1Decoder(PreferenceConfiguration prefs) {
-        // For now, don't use AV1 unless explicitly requested
+    private MediaCodecInfo findAv1Decoder(PreferenceConfiguration prefs, boolean requestedHdr) {
+        // In Auto mode, prefer AV1 on devices whose HEVC decoder is known to hang
+        if (prefs.videoFormat == PreferenceConfiguration.FormatOption.AUTO) {
+            MediaCodecInfo decoderInfo = MediaCodecHelper.findProbableSafeDecoder("video/av01", -1);
+            if (MediaCodecHelper.shouldPreferAv1OverHevc(hevcDecoder, decoderInfo)) {
+                // The host picks any AV1 format over HEVC, so offering 8-bit AV1 alongside 10-bit
+                // HEVC would quietly lose HDR. Stay on HEVC in that case.
+                if (requestedHdr && !decoderSupportsAv1Main10Hdr10(decoderInfo)) {
+                    LimeLog.info("Not preferring AV1 decoder "+decoderInfo.getName()+" because it lacks HDR support");
+                }
+                else {
+                    LimeLog.info("Preferring AV1 decoder "+decoderInfo.getName()+" over HEVC decoder "+hevcDecoder.getName());
+                    return decoderInfo;
+                }
+            }
+        }
+
+        // Otherwise, don't use AV1 unless explicitly requested
         if (prefs.videoFormat != PreferenceConfiguration.FormatOption.FORCE_AV1) {
             return null;
         }
@@ -433,7 +449,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             LimeLog.info("No HEVC decoder found");
         }
 
-        av1Decoder = findAv1Decoder(prefs);
+        av1Decoder = findAv1Decoder(prefs, requestedHdr);
         if (av1Decoder != null) {
             LimeLog.info("Selected AV1 decoder: "+av1Decoder.getName());
         }
@@ -532,13 +548,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     }
 
     public boolean isAv1Main10Supported() {
-        if (av1Decoder == null) {
-            return false;
-        }
+        return av1Decoder != null && decoderSupportsAv1Main10Hdr10(av1Decoder);
+    }
 
-        for (MediaCodecInfo.CodecProfileLevel profileLevel : av1Decoder.getCapabilitiesForType("video/av01").profileLevels) {
+    private static boolean decoderSupportsAv1Main10Hdr10(MediaCodecInfo decoderInfo) {
+        for (MediaCodecInfo.CodecProfileLevel profileLevel : decoderInfo.getCapabilitiesForType("video/av01").profileLevels) {
             if (profileLevel.profile == MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10) {
-                LimeLog.info("AV1 decoder "+av1Decoder.getName()+" supports AV1 Main 10 HDR10");
+                LimeLog.info("AV1 decoder "+decoderInfo.getName()+" supports AV1 Main 10 HDR10");
                 return true;
             }
         }
