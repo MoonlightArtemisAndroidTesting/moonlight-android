@@ -23,6 +23,25 @@ This fork has been tested on an Onn 4K Pro V2. The HEVC changes were also tested
 Box S 3rd Gen in their original author's build
 ([ClassicOldSong/moonlight-android#603](https://github.com/ClassicOldSong/moonlight-android/pull/603)).
 
+## AV1 is used automatically (recommended)
+
+Even with the fixes below, the Amlogic HEVC decoder still hangs about 2–3 times an hour (each hang
+is caught and cleared within a fraction of a second). On these boxes, AV1 doesn't have this problem:
+a 2-hour AV1 test on an Onn 4K Pro V2 had no freezes.
+
+So when the video codec setting (Settings → Advanced Settings) is **Auto**, this fork offers AV1 to
+your PC on devices with both the affected HEVC decoder and an Amlogic hardware AV1 decoder. Your PC
+uses AV1 if it can encode it, and otherwise falls back to HEVC with all the fixes below.
+
+- **Your PC needs an AV1 encoder:** NVIDIA RTX 40 series, AMD RX 7000 series, Intel Arc, or newer.
+- **Choosing a codec explicitly is always respected.** If the setting isn't Auto, set it to Auto
+  to get AV1.
+- **HDR:** if HDR is on and the box's AV1 decoder can't do 10-bit HDR, the fork stays on HEVC so
+  you don't silently lose HDR.
+
+To check which codec is in use, turn on the performance overlay: the decoder line shows a
+`c2.amlogic` AV1 decoder, and a `Forced GPU composition` line appears (see below).
+
 ## HEVC plays smoothly instead of as a slideshow
 
 `c2.amlogic.hevc.decoder` reports support for Android's low-latency mode, but when that mode is
