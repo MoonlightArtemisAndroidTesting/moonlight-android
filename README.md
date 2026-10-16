@@ -143,7 +143,7 @@ The main repo had stayed silent for 5 months, with nobody actually responding to
 **Update**: They have contacted me and apologized for this incident, but the fact it **happened** still motivated me to start my own fork.
 
 ## Downloads
-* [Download the APK for this fork](https://github.com/MoonlightArtemisAndroidTesting/moonlight-android/releases/tag/ForceGPU%2BWatchdog) (pre-release: force GPU composition + stall watchdog)
+* [Download the APK for this fork](https://github.com/MoonlightArtemisAndroidTesting/moonlight-android/releases/tag/ForceGPU%2BWatchdogV2) (pre-release v2: force GPU composition + stall watchdog)
 
 Pick the APK that matches your device's Android build: `arm64-v8a` for 64-bit Android, or
 `armeabi-v7a` for 32-bit. Many Amlogic boxes run a 32-bit Android image even though their chip is
