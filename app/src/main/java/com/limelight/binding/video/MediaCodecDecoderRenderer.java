@@ -1,5 +1,6 @@
 package com.limelight.binding.video;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -229,6 +230,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private boolean stallAwaitingIdr;
     private int stallRecoveryCount;
     private int lastStallFreezeMs;
+    // Input thread only, except creation in setup() and closing in cleanup()
+    private StallVideoCapture stallVideoCapture;
 
     private int targetFps = 0;
 
@@ -497,6 +500,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         // Use the larger of the two slices per frame preferences
         optimalSlicesPerFrame = (byte)Math.max(avcOptimalSlicesPerFrame, hevcOptimalSlicesPerFrame);
+        if (prefs.slicesPerFrame > 0) {
+            LimeLog.info("Overriding "+optimalSlicesPerFrame+" slices per frame with user setting");
+            optimalSlicesPerFrame = (byte)prefs.slicesPerFrame;
+        }
         LimeLog.info("Requesting "+optimalSlicesPerFrame+" slices per frame");
 
         if (consecutiveCrashCount % 2 == 1) {
@@ -877,7 +884,28 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         this.videoFormat = format;
         this.refreshRate = redrawRate;
 
-        return initializeDecoder(false);
+        int err = initializeDecoder(false);
+        if (err == 0 && prefs.captureVideoOnStall && outputStallWatchdogEnabled && stallVideoCapture == null) {
+            stallVideoCapture = createStallVideoCapture();
+        }
+        return err;
+    }
+
+    private StallVideoCapture createStallVideoCapture() {
+        File baseDir = context.getExternalFilesDir(null);
+        if (baseDir == null) {
+            baseDir = context.getFilesDir();
+        }
+
+        String description = "Decoder: "+videoDecoder.getName()+"\n"+
+                "Resolution: "+initialWidth+"x"+initialHeight+" at "+targetFps+" FPS\n"+
+                "Bitrate setting: "+prefs.bitrate+" Kbps\n"+
+                "Video format: 0x"+Integer.toHexString(videoFormat)+
+                ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0 ? " (10-bit)" : " (8-bit)")+"\n"+
+                "Slices per frame requested: "+optimalSlicesPerFrame+"\n"+
+                "HEVC RFI: "+refFrameInvalidationHevc+"\n"+
+                "Device: "+Build.MANUFACTURER+" "+Build.MODEL+" ("+Build.DEVICE+"), Android "+Build.VERSION.RELEASE;
+        return new StallVideoCapture(new File(baseDir, "stall-captures"), description);
     }
 
     // All threads that interact with the MediaCodec instance must call this function regularly!
@@ -1719,6 +1747,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     @Override
     public void cleanup() {
         videoDecoder.release();
+
+        if (stallVideoCapture != null) {
+            stallVideoCapture.close();
+            stallVideoCapture = null;
+        }
     }
 
     @Override
@@ -1850,10 +1883,15 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
         stallStage = Math.min(Math.max(stallStage + 1, minStage), STALL_STAGE_RESET);
         stallAwaitingIdr = true;
+        int framesQueued = stallFramesIn;
         stallFramesIn = 0;
 
-        LimeLog.warning("Output stall watchdog: no output for "+
-                (nowNs - stallLastSeenOutputNs) / 1_000_000L+" ms, recovery stage "+stallStage);
+        long noOutputMs = (nowNs - stallLastSeenOutputNs) / 1_000_000L;
+        LimeLog.warning("Output stall watchdog: no output for "+noOutputMs+" ms, recovery stage "+stallStage);
+        if (stallVideoCapture != null) {
+            stallVideoCapture.onStallDetected(stallLastFrameNumber, "stall detected after this frame, no output for "+
+                    noOutputMs+" ms, "+framesQueued+" frames queued without output, recovery stage "+stallStage);
+        }
 
         // Stages map directly onto the codec recovery types (IDR only = none, flush, restart, reset)
         int recoveryType = stallStage - 1;
@@ -1914,6 +1952,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (stopping) {
             // Don't bother if we're stopping
             return MoonBridge.DR_OK;
+        }
+
+        if (stallVideoCapture != null) {
+            // HEVC decode units reach the decoder unmodified, so this records exactly what it gets
+            stallVideoCapture.onDecodeUnit(decodeUnitData, decodeUnitLength, frameNumber, frameType, decodeUnitType);
         }
 
         if (lastFrameNumber == 0) {
@@ -2060,6 +2103,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
                 lastGpuCompositionOverlayTicks = gpuCompositionTicks;
                 lastGpuCompositionOverlayTimeMs = gpuCompositionNowMs;
+                if (stallVideoCapture != null) {
+                    sb.append(workaroundSeparator);
+                    sb.append(context.getString(R.string.perf_overlay_stall_captures,
+                            stallVideoCapture.getSavedCaptureCount()));
+                }
                 String fullLog = sb.toString();
                 if(prefs.enablePerfOverlay) {
                     perfListener.onPerfUpdate(fullLog);

@@ -118,6 +118,20 @@
         <item>forceh265</item>
         <item>neverh265</item>
     </string-array>
+    <string-array name="slices_per_frame_names">
+        <item>@string/slices_per_frame_auto</item>
+        <item>1</item>
+        <item>2</item>
+        <item>4</item>
+        <item>8</item>
+    </string-array>
+    <string-array name="slices_per_frame_values" translatable="false">
+        <item>auto</item>
+        <item>1</item>
+        <item>2</item>
+        <item>4</item>
+        <item>8</item>
+    </string-array>
 
     <string-array name="video_frame_pacing_names">
         <item>@string/pacing_warp2</item>

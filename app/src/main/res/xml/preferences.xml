@@ -979,6 +979,20 @@
             android:summary="@string/summary_prevent_packet_loss"
             android:title="@string/title_prevent_packet_loss"
             app:iconSpaceReserved="false" />
+        <ListPreference
+            android:defaultValue="auto"
+            android:entries="@array/slices_per_frame_names"
+            android:entryValues="@array/slices_per_frame_values"
+            android:key="list_slices_per_frame"
+            android:summary="@string/summary_slices_per_frame"
+            android:title="@string/title_slices_per_frame"
+            app:iconSpaceReserved="false" />
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:key="checkbox_capture_video_on_stall"
+            android:summary="@string/summary_capture_video_on_stall"
+            android:title="@string/title_capture_video_on_stall"
+            app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

@@ -97,6 +97,8 @@ public class PreferenceConfiguration {
 
     private static final String ENABLE_RUMBLE_PREF_STRING = "checkbox_enable_rumble";
     private static final String PREVENT_PACKET_LOSS_PREF_STRING = "checkbox_prevent_packet_loss";
+    private static final String SLICES_PER_FRAME_PREF_STRING = "list_slices_per_frame";
+    private static final String CAPTURE_VIDEO_ON_STALL_PREF_STRING = "checkbox_capture_video_on_stall";
 
     private static final String LIST_ONSCREEN_KEYBOARD_ALIGN_MODE = "list_onscreen_keyboard_align_mode";
 
@@ -191,6 +193,8 @@ public class PreferenceConfiguration {
     private static final boolean DEFAULT_FORCE_MOTION_SENSORS_FALLBACK = false;
     private static final boolean DEFAULT_ENABLE_RUMBLE = true;
     private static final boolean DEFAULT_PREVENT_PACKET_LOSS = false;
+    private static final String DEFAULT_SLICES_PER_FRAME = "auto";
+    private static final boolean DEFAULT_CAPTURE_VIDEO_ON_STALL = false;
     private static final boolean DEFAULT_GAMEPAD_ENABLE_BATTERY_REPORT = true;
     private static final boolean DEFAULT_FORCE_QWERTY = true;
     private static final boolean DEFAULT_SEND_META_ON_PHYSICAL_BACK = false;
@@ -379,6 +383,9 @@ public class PreferenceConfiguration {
     public boolean forceMotionSensorsFallbackToDevice;
     public boolean enableRumble;
     public boolean preventPacketLoss;
+    // 0 lets the decoder choose (see MediaCodecHelper.getDecoderOptimalSlicesPerFrame())
+    public int slicesPerFrame;
+    public boolean captureVideoOnStall;
 
     public boolean rememberZoomPan;
     public float zoomScale;
@@ -604,6 +611,19 @@ public class PreferenceConfiguration {
         else {
             // Should never get here
             return FormatOption.AUTO;
+        }
+    }
+
+    private static int getSlicesPerFrameValue(SharedPreferences prefs) {
+        String str = prefs.getString(SLICES_PER_FRAME_PREF_STRING, DEFAULT_SLICES_PER_FRAME);
+        if (str.equals("auto")) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(str);
+        } catch (NumberFormatException e) {
+            // Should never get here
+            return 0;
         }
     }
 
@@ -1025,6 +1045,8 @@ private static int getFramePacingValue(Context context) {
         config.forceMotionSensorsFallbackToDevice = prefs.getBoolean(FORCE_MOTION_SENSORS_FALLBACK_PREF_STRING, DEFAULT_FORCE_MOTION_SENSORS_FALLBACK);
         config.enableRumble = prefs.getBoolean(ENABLE_RUMBLE_PREF_STRING, DEFAULT_ENABLE_RUMBLE);
         config.preventPacketLoss = prefs.getBoolean(PREVENT_PACKET_LOSS_PREF_STRING, DEFAULT_PREVENT_PACKET_LOSS);
+        config.slicesPerFrame = getSlicesPerFrameValue(prefs);
+        config.captureVideoOnStall = prefs.getBoolean(CAPTURE_VIDEO_ON_STALL_PREF_STRING, DEFAULT_CAPTURE_VIDEO_ON_STALL);
 
         // Read custom values
         config.customResolution = prefs.getString(CUSTOM_RESOLUTION_PREF_STRING, null);
