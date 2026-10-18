@@ -904,6 +904,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0 ? " (10-bit)" : " (8-bit)")+"\n"+
                 "Slices per frame requested: "+optimalSlicesPerFrame+"\n"+
                 "HEVC RFI: "+refFrameInvalidationHevc+"\n"+
+                "Configured format: "+configuredFormat+"\n"+
                 "Device: "+Build.MANUFACTURER+" "+Build.MODEL+" ("+Build.DEVICE+"), Android "+Build.VERSION.RELEASE;
         return new StallVideoCapture(new File(baseDir, "stall-captures"), description);
     }

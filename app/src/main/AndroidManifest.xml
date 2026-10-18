@@ -238,6 +238,11 @@
         <activity android:name=".DebugInfoActivity"
             android:launchMode="singleTask"/>
 
+        <!-- Testing tool for replaying decoder stall captures -->
+        <activity android:name=".StallReplayActivity"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask"/>
+
         <!-- 无障碍 实体键盘 屏蔽某些快捷键 -->
         <service
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"

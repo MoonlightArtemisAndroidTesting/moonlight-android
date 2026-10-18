@@ -993,6 +993,11 @@
             android:summary="@string/summary_capture_video_on_stall"
             android:title="@string/title_capture_video_on_stall"
             app:iconSpaceReserved="false" />
+        <Preference
+            android:key="pref_replay_stall_capture"
+            android:summary="@string/summary_replay_stall_capture"
+            android:title="@string/title_replay_stall_capture"
+            app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

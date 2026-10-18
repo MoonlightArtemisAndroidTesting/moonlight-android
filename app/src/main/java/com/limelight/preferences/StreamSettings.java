@@ -45,6 +45,7 @@ import android.widget.Toast;
 
 import com.google.gson.Gson;
 import com.limelight.DebugInfoActivity;
+import com.limelight.StallReplayActivity;
 import com.limelight.BuildConfig;
 import com.limelight.GameMenu;
 import com.limelight.LimeLog;
@@ -852,6 +853,18 @@ public class StreamSettings extends AppCompatActivity {
                     @Override
                     public boolean onPreferenceClick(@NonNull Preference preference) {
                         Intent intent=new Intent(requireActivity(), DebugInfoActivity.class);
+                        requireActivity().startActivity(intent);
+                        return false;
+                    }
+                });
+            }
+
+            _pref = findPreference("pref_replay_stall_capture");
+            if (_pref != null) {
+                _pref.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
+                    @Override
+                    public boolean onPreferenceClick(@NonNull Preference preference) {
+                        Intent intent = new Intent(requireActivity(), StallReplayActivity.class);
                         requireActivity().startActivity(intent);
                         return false;
                     }
