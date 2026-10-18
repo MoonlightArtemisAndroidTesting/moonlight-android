@@ -5,6 +5,10 @@ import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Process;
+import android.view.Choreographer;
 import android.view.Surface;
 
 import java.io.BufferedReader;
@@ -18,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -94,6 +99,9 @@ public class StallCaptureReplayer {
 
     public static class Result {
         public int framesIn, framesOut;
+        // App-style output only: buffers rendered, and released without rendering
+        public int framesRendered, framesDropped;
+        public boolean appStyleOutput;
         public int firstFrame, lastFrameIn, lastFrameOut;
         public boolean drained;
         public String abortReason;
@@ -108,6 +116,9 @@ public class StallCaptureReplayer {
         public String toString() {
             StringBuilder sb = new StringBuilder();
             sb.append(framesIn).append(" frames in, ").append(framesOut).append(" out");
+            if (appStyleOutput) {
+                sb.append(" (").append(framesRendered).append(" rendered, ").append(framesDropped).append(" dropped)");
+            }
             if (abortReason != null) {
                 sb.append(". Aborted: ").append(abortReason);
             }
@@ -219,18 +230,32 @@ public class StallCaptureReplayer {
         return frames;
     }
 
-    // Runs one replay on the calling thread. realTime replays each frame at the time it was
-    // originally submitted; otherwise frames are fed as fast as the decoder accepts them.
-    public Result run(Surface surface, boolean realTime, boolean ultraLowLatency) throws IOException {
+    public static class Options {
+        // Replay each frame at the time it was originally submitted, otherwise as fast as the
+        // decoder accepts them
+        public boolean realTime;
+        public boolean ultraLowLatency;
+        // Handle output like the stream (see AppStyleOutputThread), otherwise render every frame
+        public boolean appStyleOutput;
+        public boolean preferLowerDelays;
+        public float refreshRate = 60;
+    }
+
+    // Runs one replay on the calling thread
+    public Result run(Surface surface, Options options) throws IOException {
+        boolean realTime = options.realTime;
         Result result = new Result();
         result.firstFrame = frames.get(0).frameNumber;
+        result.appStyleOutput = options.appStyleOutput;
         ptsToFrame.clear();
         queueNsByIndex = new AtomicLongArray(frames.size());
         lastQueuedIndex = -1;
         eosReceived = false;
 
-        MediaCodec codec = createDecoder(surface, ultraLowLatency);
-        OutputThread output = new OutputThread(codec, result);
+        MediaCodec codec = createDecoder(surface, options.ultraLowLatency);
+        OutputThread output = options.appStyleOutput ?
+                new AppStyleOutputThread(codec, result, options.preferLowerDelays, options.refreshRate) :
+                new RenderAllOutputThread(codec, result);
         output.start();
 
         try (RandomAccessFile video = new RandomAccessFile(videoFile, "r")) {
@@ -445,11 +470,12 @@ public class StallCaptureReplayer {
         return null;
     }
 
-    // Drains decoder output, renders it to the surface as the stream does, and records stalls
-    private class OutputThread extends Thread {
-        private final MediaCodec codec;
-        private final Result result;
-        private volatile boolean finished;
+    // Drains decoder output and records stalls. Subclasses decide how output is released.
+    private abstract class OutputThread extends Thread {
+        final MediaCodec codec;
+        final Result result;
+        volatile boolean finished;
+        private int lastOutputIndex = -1;
 
         OutputThread(MediaCodec codec, Result result) {
             super("Stall replay output");
@@ -457,10 +483,50 @@ public class StallCaptureReplayer {
             this.result = result;
         }
 
+        // Records a dequeued output buffer. Returns true if it is the end of stream.
+        boolean recordOutput(MediaCodec.BufferInfo bufferInfo) {
+            Integer frameNumber = ptsToFrame.get(bufferInfo.presentationTimeUs);
+            Integer frameIndex = frameNumber != null ? frameIndexByNumber.get(frameNumber) : null;
+            if (frameIndex != null) {
+                // Same rule as the output stall watchdog: measure from when the decoder was
+                // given the oldest frame it hadn't answered, not from the last output, so a
+                // burst of input after a gap isn't mistaken for a stall. Like the watchdog,
+                // ignore startup before the first output.
+                int oldestUnanswered = lastOutputIndex + 1;
+                int queued = lastQueuedIndex - lastOutputIndex;
+                if (lastOutputIndex >= 0 && oldestUnanswered <= lastQueuedIndex && queued >= STALL_MIN_FRAMES) {
+                    long waitNs = System.nanoTime() - queueNsByIndex.get(oldestUnanswered);
+                    if (waitNs >= STALL_MIN_NS) {
+                        result.stalls.add("no output for "+waitNs / 1_000_000L+" ms after frame "+
+                                result.lastFrameOut+" with "+queued+" frames queued");
+                    }
+                }
+                lastOutputIndex = Math.max(lastOutputIndex, frameIndex);
+                result.framesOut++;
+                result.lastFrameOut = frameNumber;
+            }
+            return (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+        }
+
+        void finish() {
+            finished = true;
+            try {
+                join(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    // Renders every frame as soon as it is decoded
+    private class RenderAllOutputThread extends OutputThread {
+        RenderAllOutputThread(MediaCodec codec, Result result) {
+            super(codec, result);
+        }
+
         @Override
         public void run() {
             MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-            int lastOutputIndex = -1;
             while (!finished && !eosReceived) {
                 int index;
                 try {
@@ -472,42 +538,149 @@ public class StallCaptureReplayer {
                     continue;
                 }
 
-                boolean eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
-                Integer frameNumber = ptsToFrame.get(bufferInfo.presentationTimeUs);
-                Integer frameIndex = frameNumber != null ? frameIndexByNumber.get(frameNumber) : null;
-                if (frameIndex != null) {
-                    // Same rule as the output stall watchdog: measure from when the decoder was
-                    // given the oldest frame it hadn't answered, not from the last output, so a
-                    // burst of input after a gap isn't mistaken for a stall. Like the watchdog,
-                    // ignore startup before the first output.
-                    int oldestUnanswered = lastOutputIndex + 1;
-                    int queued = lastQueuedIndex - lastOutputIndex;
-                    if (lastOutputIndex >= 0 && oldestUnanswered <= lastQueuedIndex && queued >= STALL_MIN_FRAMES) {
-                        long waitNs = System.nanoTime() - queueNsByIndex.get(oldestUnanswered);
-                        if (waitNs >= STALL_MIN_NS) {
-                            result.stalls.add("no output for "+waitNs / 1_000_000L+" ms after frame "+
-                                    result.lastFrameOut+" with "+queued+" frames queued");
-                        }
-                    }
-                    lastOutputIndex = Math.max(lastOutputIndex, frameIndex);
-                    result.framesOut++;
-                    result.lastFrameOut = frameNumber;
-                }
-
+                boolean eos = recordOutput(bufferInfo);
                 codec.releaseOutputBuffer(index, bufferInfo.size > 0);
                 if (eos) {
                     eosReceived = true;
                 }
             }
         }
+    }
 
-        void finish() {
-            finished = true;
+    // Copies the output handling of MediaCodecDecoderRenderer's renderer thread with frame pacing
+    // forced to Balanced (as Game.java does): unless preferLowerDelays is set, each pass first
+    // drains every ready buffer, drops all but the newest and renders that one immediately.
+    // Otherwise it waits briefly for one buffer and queues it (at most 2, dropping the oldest)
+    // for a Choreographer thread that renders one per display refresh once a frame is due.
+    private class AppStyleOutputThread extends OutputThread implements Choreographer.FrameCallback {
+        private static final int OUTPUT_BUFFER_QUEUE_LIMIT = 2;
+
+        private final boolean preferLowerDelays;
+        private final float refreshRate;
+        private final LinkedBlockingQueue<Integer> outputBufferQueue = new LinkedBlockingQueue<>();
+        private HandlerThread choreographerThread;
+        // Choreographer thread only, added to the result once both threads have finished
+        private long lastRenderedFrameTimeNanos;
+        private volatile int choreographerRendered;
+
+        AppStyleOutputThread(MediaCodec codec, Result result, boolean preferLowerDelays, float refreshRate) {
+            super(codec, result);
+            this.preferLowerDelays = preferLowerDelays;
+            this.refreshRate = refreshRate;
+            setPriority(Thread.NORM_PRIORITY + 2);
+        }
+
+        @Override
+        public void run() {
+            choreographerThread = new HandlerThread("Stall replay choreographer", Process.THREAD_PRIORITY_URGENT_DISPLAY);
+            choreographerThread.start();
+            new Handler(choreographerThread.getLooper()).post(() ->
+                    Choreographer.getInstance().postFrameCallback(this));
+
+            MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+            int tryAgainStreak = 0;
             try {
-                join(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                while (!finished && !eosReceived) {
+                    if (!preferLowerDelays) {
+                        // Drain without blocking and keep only the newest buffer
+                        int index = codec.dequeueOutputBuffer(bufferInfo, 0);
+                        int last = -1;
+                        while (index >= 0) {
+                            if (recordOutput(bufferInfo)) {
+                                codec.releaseOutputBuffer(index, false);
+                                eosReceived = true;
+                                break;
+                            }
+                            if (last >= 0) {
+                                codec.releaseOutputBuffer(last, false);
+                                result.framesDropped++;
+                            }
+                            last = index;
+                            index = codec.dequeueOutputBuffer(bufferInfo, 0);
+                        }
+                        if (last >= 0) {
+                            codec.releaseOutputBuffer(last, System.nanoTime());
+                            result.framesRendered++;
+                            continue;
+                        }
+                        if (eosReceived) {
+                            break;
+                        }
+                    }
+
+                    int index = codec.dequeueOutputBuffer(bufferInfo, preferLowerDelays ? 500 : 2000);
+                    if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                        tryAgainStreak++;
+                        index = codec.dequeueOutputBuffer(bufferInfo, tryAgainStreak <= 2 ? 250 : 500);
+                    }
+                    else {
+                        tryAgainStreak = 0;
+                    }
+                    if (index < 0) {
+                        continue;
+                    }
+
+                    if (recordOutput(bufferInfo)) {
+                        codec.releaseOutputBuffer(index, false);
+                        eosReceived = true;
+                        break;
+                    }
+
+                    // The Choreographer may not run for a while, so drop on the producer side
+                    if (outputBufferQueue.size() >= OUTPUT_BUFFER_QUEUE_LIMIT) {
+                        Integer oldest = outputBufferQueue.poll();
+                        if (oldest != null) {
+                            codec.releaseOutputBuffer(oldest, false);
+                            result.framesDropped++;
+                        }
+                    }
+                    outputBufferQueue.add(index);
+                }
+            } catch (IllegalStateException e) {
+                // The codec is being stopped
+            } finally {
+                choreographerThread.quitSafely();
+                try {
+                    choreographerThread.join(1000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
+        }
+
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            if (finished || eosReceived) {
+                return;
+            }
+
+            // Render at most one frame per display refresh, and only once a new frame is due
+            long expectedFrameTimeDeltaNs = (long) (800_000_000L / refreshRate);
+            if (frameTimeNanos - lastRenderedFrameTimeNanos >= expectedFrameTimeDeltaNs) {
+                Integer index = outputBufferQueue.poll();
+                if (index != null) {
+                    try {
+                        if (preferLowerDelays) {
+                            codec.releaseOutputBuffer(index, true);
+                        }
+                        else {
+                            codec.releaseOutputBuffer(index, frameTimeNanos);
+                        }
+                        choreographerRendered++;
+                        lastRenderedFrameTimeNanos = frameTimeNanos;
+                    } catch (IllegalStateException e) {
+                        return;
+                    }
+                }
+            }
+            Choreographer.getInstance().postFrameCallback(this);
+        }
+
+        @Override
+        void finish() {
+            // Joins this thread, which joins the Choreographer thread before exiting
+            super.finish();
+            result.framesRendered += choreographerRendered;
         }
     }
 }

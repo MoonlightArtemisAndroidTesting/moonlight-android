@@ -37,7 +37,7 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
     private File captureDir;
     private final List<File> captures = new ArrayList<>();
 
-    private Spinner captureSpinner, modeSpinner, repeatSpinner;
+    private Spinner captureSpinner, modeSpinner, outputSpinner, repeatSpinner;
     private Button startButton;
     private TextView logView;
     private ScrollView logScroll;
@@ -58,6 +58,7 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
 
         captureSpinner = findViewById(R.id.stallReplayCapture);
         modeSpinner = findViewById(R.id.stallReplayMode);
+        outputSpinner = findViewById(R.id.stallReplayOutput);
         repeatSpinner = findViewById(R.id.stallReplayRepeat);
         startButton = findViewById(R.id.stallReplayStart);
         logView = findViewById(R.id.stallReplayLog);
@@ -67,6 +68,8 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
 
         modeSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
                 new String[] {getString(R.string.stall_replay_mode_realtime), getString(R.string.stall_replay_mode_fast)}));
+        outputSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+                new String[] {getString(R.string.stall_replay_output_all), getString(R.string.stall_replay_output_app)}));
         String[] repeatNames = new String[REPEAT_COUNTS.length];
         for (int i = 0; i < REPEAT_COUNTS.length; i++) {
             repeatNames[i] = Integer.toString(REPEAT_COUNTS[i]);
@@ -122,9 +125,16 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
         String base = video.getName().replace(".h265", "");
         File index = new File(captureDir, base+".csv");
         File info = new File(captureDir, base+".txt");
-        boolean realTime = modeSpinner.getSelectedItemPosition() == 0;
         int repeats = REPEAT_COUNTS[Math.max(0, repeatSpinner.getSelectedItemPosition())];
-        boolean ultraLowLatency = PreferenceConfiguration.readPreferences(this).enableUltraLowLatency;
+        PreferenceConfiguration prefs = PreferenceConfiguration.readPreferences(this);
+
+        StallCaptureReplayer.Options options = new StallCaptureReplayer.Options();
+        options.realTime = modeSpinner.getSelectedItemPosition() == 0;
+        options.ultraLowLatency = prefs.enableUltraLowLatency;
+        options.appStyleOutput = outputSpinner.getSelectedItemPosition() == 1;
+        options.preferLowerDelays = prefs.preferLowerDelays;
+        options.refreshRate = getWindowManager().getDefaultDisplay().getRefreshRate();
+        boolean realTime = options.realTime;
 
         stopRequested = false;
         startButton.setText(R.string.stall_replay_stop);
@@ -135,14 +145,18 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                 log("");
                 log("Replaying "+base+": "+replayer.getFrameCount()+" frames, "+
                         (realTime ? "original timing" : "as fast as possible")+", "+repeats+" run(s), "+
-                        "ultra low latency "+(ultraLowLatency ? "on" : "off"));
+                        "ultra low latency "+(options.ultraLowLatency ? "on" : "off"));
+                log(options.appStyleOutput ?
+                        String.format(Locale.US, "Output like the stream: prefer lower delays %s, display %.2f Hz",
+                                options.preferLowerDelays ? "on" : "off", options.refreshRate) :
+                        "Output: render every frame");
 
                 log("Reading the capture into memory first...");
                 log(String.format(Locale.US, "Read at %.0f MB/s", replayer.warmUp()));
 
                 for (int run = 1; run <= repeats && !stopRequested; run++) {
                     activeReplayer = replayer;
-                    StallCaptureReplayer.Result result = replayer.run(surface, realTime, ultraLowLatency);
+                    StallCaptureReplayer.Result result = replayer.run(surface, options);
                     activeReplayer = null;
                     if (result.abortReason != null && result.abortReason.equals("cancelled")) {
                         break;
@@ -154,12 +168,12 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                     }
                     String line = "Run "+run+": "+result;
                     log(line);
-                    appendResult(base, realTime, line);
+                    appendResult(base, options, line);
                 }
 
                 String summary = "Summary for "+base+": stall reproduced in "+reproduced+" of "+completed+" run(s)";
                 log(summary);
-                appendResult(base, realTime, summary);
+                appendResult(base, options, summary);
             } catch (IOException | RuntimeException e) {
                 log("Replay failed: "+e);
             } finally {
@@ -180,10 +194,11 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
         }
     }
 
-    private void appendResult(String base, boolean realTime, String line) {
+    private void appendResult(String base, StallCaptureReplayer.Options options, String line) {
         File results = new File(captureDir, "replay-results.txt");
         try (PrintWriter out = new PrintWriter(new FileOutputStream(results, true))) {
-            out.println(new Date()+" "+base+" ["+(realTime ? "original timing" : "fast")+"] "+line);
+            out.println(new Date()+" "+base+" ["+(options.realTime ? "original timing" : "fast")+", "+
+                    (options.appStyleOutput ? "stream-style output" : "render all")+"] "+line);
         } catch (IOException ignored) {}
     }
 

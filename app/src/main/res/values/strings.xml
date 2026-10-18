@@ -324,6 +324,9 @@
     <string name="stall_replay_mode">Timing</string>
     <string name="stall_replay_mode_realtime">Original timing (as streamed)</string>
     <string name="stall_replay_mode_fast">As fast as possible</string>
+    <string name="stall_replay_output">Output handling</string>
+    <string name="stall_replay_output_all">Render every frame</string>
+    <string name="stall_replay_output_app">Like the stream (keep newest frame, drop the rest)</string>
     <string name="stall_replay_repeat">Runs</string>
     <string name="stall_replay_start">Start replay</string>
     <string name="stall_replay_stop">Stop</string>
