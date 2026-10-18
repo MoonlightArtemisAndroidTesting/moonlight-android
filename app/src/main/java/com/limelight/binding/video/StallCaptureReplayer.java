@@ -110,8 +110,23 @@ public class StallCaptureReplayer {
         // The input frame at which the output stall watchdog would first have fired, or 0
         public int watchdogFrame;
         public long watchdogMs;
+        // The decoder stopped taking input. In fast runs its queue is full, so a stuck decoder
+        // shows up this way rather than as missing output.
+        public boolean inputRefused;
         public final List<String> stalls = new ArrayList<>();
+        public int moreStalls;
         public final List<String> inputDelays = new ArrayList<>();
+
+        private static final int MAX_LISTED_STALLS = 20;
+
+        void addStall(String stall) {
+            if (stalls.size() < MAX_LISTED_STALLS) {
+                stalls.add(stall);
+            }
+            else {
+                moreStalls++;
+            }
+        }
 
         public int missingFrames() {
             return Math.max(0, framesIn - framesOut);
@@ -119,7 +134,11 @@ public class StallCaptureReplayer {
 
         // Output stopped and never came back: the hang the watchdog recovers from in a stream
         public boolean permanentStall() {
-            return abortReason == null && (!drained || (missingFrames() > 0 && lastFrameOut != lastFrameIn));
+            if (abortReason != null && !inputRefused) {
+                // Cancelled, or a problem with the replay itself
+                return false;
+            }
+            return inputRefused || !drained || (missingFrames() > 0 && lastFrameOut != lastFrameIn);
         }
 
         public boolean reproduced() {
@@ -149,6 +168,9 @@ public class StallCaptureReplayer {
             }
             if (!stalls.isEmpty()) {
                 sb.append(". Temporary stalls: ").append(String.join("; ", stalls));
+                if (moreStalls > 0) {
+                    sb.append("; and ").append(moreStalls).append(" more");
+                }
             }
             if (!reproduced() && abortReason == null) {
                 sb.append(". Not reproduced: every frame decoded");
@@ -176,6 +198,10 @@ public class StallCaptureReplayer {
     private volatile int lastQueuedIndex;
     // Index of the newest frame the decoder has output, written by the output thread
     private volatile int lastOutputIndex;
+    // When the decoder last produced a frame, written by the output thread
+    private volatile long lastOutputNs;
+    // Set for "as fast as possible" runs, where the decoder's input queue is always full
+    private volatile boolean saturatedInput;
     private volatile boolean eosReceived;
 
     public StallCaptureReplayer(File videoFile, File indexFile, File infoFile, Listener listener) throws IOException {
@@ -277,6 +303,19 @@ public class StallCaptureReplayer {
         }
     }
 
+    // How long the decoder has gone without answering, given the index of its last output.
+    // With original timing this is the output stall watchdog's rule: time since the oldest
+    // unanswered frame was queued, so a burst of input after a gap isn't mistaken for a stall.
+    // In fast runs the input queue is always full, so every frame waits behind several others
+    // (about 60 ms at 4K) and that rule would flag every frame. There, input never pauses, so
+    // the time since the last output is the right measure.
+    private long stallWaitNs(int lastOutputIndex, long nowNs) {
+        if (saturatedInput) {
+            return nowNs - lastOutputNs;
+        }
+        return nowNs - queueNsByIndex.get(lastOutputIndex + 1);
+    }
+
     public static final int SETTING_APP_DEFAULT = 0;
     public static final int SETTING_OFF = 1;
     public static final int SETTING_ON = 2;
@@ -326,6 +365,8 @@ public class StallCaptureReplayer {
         queueNsByIndex = new AtomicLongArray(frames.size());
         lastQueuedIndex = -1;
         lastOutputIndex = -1;
+        lastOutputNs = 0;
+        saturatedInput = !realTime;
         eosReceived = false;
 
         MediaCodec codec = createDecoder(surface, options);
@@ -400,11 +441,12 @@ public class StallCaptureReplayer {
                 queueNsByIndex.set(frameIndex, queuedNs);
                 lastQueuedIndex = frameIndex;
 
-                // Check exactly as the output stall watchdog does after queuing each frame. The
-                // latest detection is kept, so for a permanent stall it marks where it began.
+                // Check as the output stall watchdog does after queuing each frame (see
+                // stallWaitNs() for fast runs). The latest detection is kept, so for a permanent
+                // stall it marks where it began.
                 int lastOut = lastOutputIndex;
                 if (lastOut >= 0 && lastOut != watchdogOutputIndex && frameIndex - lastOut >= STALL_MIN_FRAMES &&
-                        queuedNs - queueNsByIndex.get(lastOut + 1) >= STALL_MIN_NS) {
+                        stallWaitNs(lastOut, queuedNs) >= STALL_MIN_NS) {
                     watchdogOutputIndex = lastOut;
                     result.watchdogFrame = frame.frameNumber;
                     result.watchdogMs = (queuedNs - startNs) / 1_000_000L;
@@ -457,7 +499,13 @@ public class StallCaptureReplayer {
     private boolean queue(MediaCodec codec, byte[] data, int length, long ptsUs, int flags, Result result, Frame frame) {
         int index = dequeueInput(codec);
         if (index < 0) {
-            result.abortReason = "decoder stopped accepting input at frame "+frame.frameNumber;
+            if (cancelled) {
+                result.abortReason = "cancelled";
+            }
+            else {
+                result.abortReason = "decoder stopped accepting input at frame "+frame.frameNumber;
+                result.inputRefused = true;
+            }
             return false;
         }
 
@@ -576,21 +624,19 @@ public class StallCaptureReplayer {
             Integer frameNumber = ptsToFrame.get(bufferInfo.presentationTimeUs);
             Integer frameIndex = frameNumber != null ? frameIndexByNumber.get(frameNumber) : null;
             if (frameIndex != null) {
-                // Same rule as the output stall watchdog: measure from when the decoder was
-                // given the oldest frame it hadn't answered, not from the last output, so a
-                // burst of input after a gap isn't mistaken for a stall. Like the watchdog,
-                // ignore startup before the first output.
+                // Like the watchdog, ignore startup before the first output
+                long nowNs = System.nanoTime();
                 int lastOut = lastOutputIndex;
-                int oldestUnanswered = lastOut + 1;
                 int queued = lastQueuedIndex - lastOut;
-                if (lastOut >= 0 && oldestUnanswered <= lastQueuedIndex && queued >= STALL_MIN_FRAMES) {
-                    long waitNs = System.nanoTime() - queueNsByIndex.get(oldestUnanswered);
+                if (lastOut >= 0 && lastOut < lastQueuedIndex && queued >= STALL_MIN_FRAMES) {
+                    long waitNs = stallWaitNs(lastOut, nowNs);
                     if (waitNs >= STALL_MIN_NS) {
-                        result.stalls.add("no output for "+waitNs / 1_000_000L+" ms after frame "+
+                        result.addStall("no output for "+waitNs / 1_000_000L+" ms after frame "+
                                 result.lastFrameOut+" with "+queued+" frames queued");
                     }
                 }
-                // Only this thread writes it
+                // Only this thread writes these
+                lastOutputNs = nowNs;
                 lastOutputIndex = Math.max(lastOut, frameIndex);
                 result.framesOut++;
                 result.lastFrameOut = frameNumber;

@@ -125,6 +125,28 @@ public class StallCaptureReplayerTest {
     }
 
     @Test
+    public void decoderRefusingInputIsAPermanentStall() {
+        // In fast runs a stuck decoder's input queue fills up, so the run aborts on input
+        StallCaptureReplayer.Result r = result(1500, 1490, 1501, 1491, false);
+        r.abortReason = "decoder stopped accepting input at frame 1502";
+        r.inputRefused = true;
+        assertTrue(r.permanentStall());
+        assertTrue(r.reproduced());
+    }
+
+    @Test
+    public void stallListIsCapped() {
+        StallCaptureReplayer.Result r = result(2663, 2663, 2664, 2664, true);
+        for (int i = 0; i < 2600; i++) {
+            r.addStall("no output for 60 ms after frame "+i);
+        }
+        assertEquals(20, r.stalls.size());
+        assertEquals(2580, r.moreStalls);
+        assertTrue(r.toString().contains("and 2580 more"));
+        assertTrue(r.toString().length() < 2000);
+    }
+
+    @Test
     public void cancelledRunIsNotAStall() {
         StallCaptureReplayer.Result r = result(1000, 990, 1001, 991, false);
         r.abortReason = "cancelled";
