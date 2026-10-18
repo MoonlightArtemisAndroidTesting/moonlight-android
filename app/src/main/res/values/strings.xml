@@ -328,6 +328,13 @@
     <string name="stall_replay_output_all">Render every frame</string>
     <string name="stall_replay_output_app">Like the stream (keep newest frame, drop the rest)</string>
     <string name="stall_replay_repeat">Runs</string>
+    <string name="stall_replay_android_low_latency">Android low latency (KEY_LOW_LATENCY)</string>
+    <string name="stall_replay_vdec_low_latency">Amlogic low latency (vdec-lowlatency)</string>
+    <string name="stall_replay_vendor_low_latency">Vendor low latency (vendor.low-latency.enable)</string>
+    <string name="stall_replay_realtime_priority">Realtime priority / max operating rate</string>
+    <string name="stall_replay_setting_default">App default</string>
+    <string name="stall_replay_setting_off">Off</string>
+    <string name="stall_replay_setting_on">On</string>
     <string name="stall_replay_start">Start replay</string>
     <string name="stall_replay_stop">Stop</string>
     <string name="stall_replay_no_captures">No captures found. Turn on \"Capture video on decoder stall\" and stream until a stall is caught, or adb push a stall-*.h265 with its .csv and .txt to:\n%1$s</string>

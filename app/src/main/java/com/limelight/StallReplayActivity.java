@@ -39,6 +39,8 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
     private final List<File> captures = new ArrayList<>();
 
     private Spinner captureSpinner, modeSpinner, outputSpinner, repeatSpinner;
+    // Decoder setting overrides. Positions match StallCaptureReplayer.SETTING_* (default, off, on).
+    private Spinner androidLowLatencySpinner, vdecLowLatencySpinner, vendorLowLatencySpinner, realtimePrioritySpinner;
     private Button startButton;
     private TextView logView;
     private ScrollView logScroll;
@@ -76,6 +78,20 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
             repeatNames[i] = Integer.toString(REPEAT_COUNTS[i]);
         }
         repeatSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, repeatNames));
+
+        // Stream-style output is the closest match to a real stream, so start there
+        outputSpinner.setSelection(1);
+
+        String[] settingNames = {getString(R.string.stall_replay_setting_default),
+                getString(R.string.stall_replay_setting_off), getString(R.string.stall_replay_setting_on)};
+        androidLowLatencySpinner = findViewById(R.id.stallReplayAndroidLowLatency);
+        vdecLowLatencySpinner = findViewById(R.id.stallReplayVdecLowLatency);
+        vendorLowLatencySpinner = findViewById(R.id.stallReplayVendorLowLatency);
+        realtimePrioritySpinner = findViewById(R.id.stallReplayRealtimePriority);
+        for (Spinner spinner : new Spinner[] {androidLowLatencySpinner, vdecLowLatencySpinner,
+                vendorLowLatencySpinner, realtimePrioritySpinner}) {
+            spinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, settingNames));
+        }
 
         File baseDir = getExternalFilesDir(null);
         captureDir = new File(baseDir != null ? baseDir : getFilesDir(), "stall-captures");
@@ -135,12 +151,16 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
         options.appStyleOutput = outputSpinner.getSelectedItemPosition() == 1;
         options.preferLowerDelays = prefs.preferLowerDelays;
         options.refreshRate = getWindowManager().getDefaultDisplay().getRefreshRate();
+        options.androidLowLatency = androidLowLatencySpinner.getSelectedItemPosition();
+        options.vdecLowLatency = vdecLowLatencySpinner.getSelectedItemPosition();
+        options.vendorLowLatency = vendorLowLatencySpinner.getSelectedItemPosition();
+        options.realtimePriority = realtimePrioritySpinner.getSelectedItemPosition();
         boolean realTime = options.realTime;
 
         stopRequested = false;
         startButton.setText(R.string.stall_replay_stop);
         replayThread = new Thread(() -> {
-            int reproduced = 0, completed = 0;
+            int permanent = 0, temporary = 0, skipped = 0, completed = 0;
             try {
                 StallCaptureReplayer replayer = new StallCaptureReplayer(video, index, info, this::log);
                 log("");
@@ -151,6 +171,7 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                         String.format(Locale.US, "Output like the stream: prefer lower delays %s, display %.2f Hz",
                                 options.preferLowerDelays ? "on" : "off", options.refreshRate) :
                         "Output: render every frame");
+                log("Decoder settings: "+options.describeOverrides());
 
                 log("Reading the capture into memory first...");
                 log(String.format(Locale.US, "Read at %.0f MB/s", replayer.warmUp()));
@@ -167,19 +188,31 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
 
                     completed++;
                     framesDecoded += result.framesOut;
-                    if (result.reproduced()) {
-                        reproduced++;
+                    if (result.permanentStall()) {
+                        permanent++;
+                    }
+                    else if (result.missingFrames() > 0) {
+                        skipped++;
+                    }
+                    if (!result.stalls.isEmpty()) {
+                        temporary++;
                     }
                     String line = "Run "+run+": "+result;
                     log(line);
                     appendResult(base, options, line);
                 }
 
-                // Frames and time let the result be compared with the live stall rate
+                // Express the permanent stall rate per hour of decoded video, so it can be
+                // compared with the live rate and across timing modes that decode at different speeds
+                int fps = Math.max(1, replayer.getInfo().fps);
+                double videoHours = framesDecoded / (double) fps / 3600.0;
                 String summary = String.format(Locale.US,
-                        "Summary for %s: stall reproduced in %d of %d run(s), %d frames decoded over %.1f minutes",
-                        base, reproduced, completed, framesDecoded,
-                        (System.currentTimeMillis() - soakStartMs) / 60000.0);
+                        "Summary for %s: %d permanent stall(s), %d run(s) with temporary stalls, %d with skipped frames, " +
+                                "in %d run(s). %d frames decoded (%.2f hours of video at %d FPS) over %.1f minutes. " +
+                                "Permanent stalls per hour of video: %.2f. Decoder settings: %s",
+                        base, permanent, temporary, skipped, completed, framesDecoded, videoHours, fps,
+                        (System.currentTimeMillis() - soakStartMs) / 60000.0,
+                        videoHours > 0 ? permanent / videoHours : 0.0, options.describeOverrides());
                 log(summary);
                 appendResult(base, options, summary);
             } catch (IOException | RuntimeException e) {

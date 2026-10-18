@@ -103,13 +103,27 @@ public class StallCaptureReplayer {
         public int framesRendered, framesDropped;
         public boolean appStyleOutput;
         public int firstFrame, lastFrameIn, lastFrameOut;
+        // Set when the end of stream marker came back. A stuck Amlogic decoder still returns it,
+        // so this alone doesn't mean every frame was decoded.
         public boolean drained;
         public String abortReason;
+        // The input frame at which the output stall watchdog would first have fired, or 0
+        public int watchdogFrame;
+        public long watchdogMs;
         public final List<String> stalls = new ArrayList<>();
         public final List<String> inputDelays = new ArrayList<>();
 
+        public int missingFrames() {
+            return Math.max(0, framesIn - framesOut);
+        }
+
+        // Output stopped and never came back: the hang the watchdog recovers from in a stream
+        public boolean permanentStall() {
+            return abortReason == null && (!drained || (missingFrames() > 0 && lastFrameOut != lastFrameIn));
+        }
+
         public boolean reproduced() {
-            return !drained || !stalls.isEmpty();
+            return permanentStall() || missingFrames() > 0 || !stalls.isEmpty();
         }
 
         @Override
@@ -122,14 +136,21 @@ public class StallCaptureReplayer {
             if (abortReason != null) {
                 sb.append(". Aborted: ").append(abortReason);
             }
-            if (!drained) {
+            if (permanentStall()) {
                 sb.append(". STALL REPRODUCED: output stopped after frame ").append(lastFrameOut)
-                        .append(" and never resumed (last frame in: ").append(lastFrameIn).append(")");
+                        .append(" and never resumed, ").append(missingFrames()).append(" frames never came out");
+                if (watchdogFrame != 0) {
+                    sb.append(" (watchdog would have fired at frame ").append(watchdogFrame)
+                            .append(", ").append(watchdogMs / 1000.0).append(" s into the run)");
+                }
             }
-            else if (!stalls.isEmpty()) {
+            else if (missingFrames() > 0) {
+                sb.append(". Decoder skipped ").append(missingFrames()).append(" frames but kept going");
+            }
+            if (!stalls.isEmpty()) {
                 sb.append(". Temporary stalls: ").append(String.join("; ", stalls));
             }
-            else {
+            if (!reproduced() && abortReason == null) {
                 sb.append(". Not reproduced: every frame decoded");
             }
             if (!inputDelays.isEmpty()) {
@@ -153,6 +174,8 @@ public class StallCaptureReplayer {
     // When each frame (by index) was fully queued, and the index of the last queued frame
     private AtomicLongArray queueNsByIndex;
     private volatile int lastQueuedIndex;
+    // Index of the newest frame the decoder has output, written by the output thread
+    private volatile int lastOutputIndex;
     private volatile boolean eosReceived;
 
     public StallCaptureReplayer(File videoFile, File indexFile, File infoFile, Listener listener) throws IOException {
@@ -239,6 +262,58 @@ public class StallCaptureReplayer {
         public boolean appStyleOutput;
         public boolean preferLowerDelays;
         public float refreshRate = 60;
+
+        // Decoder setting overrides, applied on top of MediaCodecHelper.setDecoderLowLatencyOptions()
+        public int androidLowLatency = SETTING_APP_DEFAULT;   // KEY_LOW_LATENCY ("low-latency")
+        public int vdecLowLatency = SETTING_APP_DEFAULT;      // "vdec-lowlatency"
+        public int vendorLowLatency = SETTING_APP_DEFAULT;    // "vendor.low-latency.enable"
+        public int realtimePriority = SETTING_APP_DEFAULT;    // KEY_PRIORITY 0 and KEY_OPERATING_RATE
+
+        public String describeOverrides() {
+            return "KEY_LOW_LATENCY "+settingName(androidLowLatency)+
+                    ", vdec-lowlatency "+settingName(vdecLowLatency)+
+                    ", vendor.low-latency.enable "+settingName(vendorLowLatency)+
+                    ", realtime priority "+settingName(realtimePriority);
+        }
+    }
+
+    public static final int SETTING_APP_DEFAULT = 0;
+    public static final int SETTING_OFF = 1;
+    public static final int SETTING_ON = 2;
+
+    private static String settingName(int setting) {
+        return setting == SETTING_OFF ? "off" : setting == SETTING_ON ? "on" : "app default";
+    }
+
+    private static void applySetting(MediaFormat format, String key, int setting, int onValue) {
+        if (setting == SETTING_ON) {
+            format.setInteger(key, onValue);
+        }
+        else if (setting == SETTING_OFF && format.containsKey(key)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                format.removeKey(key);
+            }
+            else {
+                format.setInteger(key, 0);
+            }
+        }
+    }
+
+    private static void applyOverrides(MediaFormat format, Options options) {
+        applySetting(format, "low-latency", options.androidLowLatency, 1);
+        applySetting(format, "vdec-lowlatency", options.vdecLowLatency, 1);
+        applySetting(format, "vendor.low-latency.enable", options.vendorLowLatency, 1);
+        if (options.realtimePriority == SETTING_ON) {
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0);
+        }
+        else if (options.realtimePriority == SETTING_OFF) {
+            // Turning "off" means not asking for either; the decoder picks its own
+            for (String key : new String[] {MediaFormat.KEY_PRIORITY, MediaFormat.KEY_OPERATING_RATE}) {
+                if (format.containsKey(key) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    format.removeKey(key);
+                }
+            }
+        }
     }
 
     // Runs one replay on the calling thread
@@ -250,9 +325,10 @@ public class StallCaptureReplayer {
         ptsToFrame.clear();
         queueNsByIndex = new AtomicLongArray(frames.size());
         lastQueuedIndex = -1;
+        lastOutputIndex = -1;
         eosReceived = false;
 
-        MediaCodec codec = createDecoder(surface, options.ultraLowLatency);
+        MediaCodec codec = createDecoder(surface, options);
         OutputThread output = options.appStyleOutput ?
                 new AppStyleOutputThread(codec, result, options.preferLowerDelays, options.refreshRate) :
                 new RenderAllOutputThread(codec, result);
@@ -263,6 +339,8 @@ public class StallCaptureReplayer {
             long startNs = System.nanoTime();
             long lastPtsUs = -1;
             boolean reportedLate = false;
+            // The output position at the last watchdog detection, so each stall is noted once
+            int watchdogOutputIndex = -2;
 
             for (int frameIndex = 0; frameIndex < frames.size(); frameIndex++) {
                 Frame frame = frames.get(frameIndex);
@@ -321,6 +399,16 @@ public class StallCaptureReplayer {
                 long queuedNs = System.nanoTime();
                 queueNsByIndex.set(frameIndex, queuedNs);
                 lastQueuedIndex = frameIndex;
+
+                // Check exactly as the output stall watchdog does after queuing each frame. The
+                // latest detection is kept, so for a permanent stall it marks where it began.
+                int lastOut = lastOutputIndex;
+                if (lastOut >= 0 && lastOut != watchdogOutputIndex && frameIndex - lastOut >= STALL_MIN_FRAMES &&
+                        queuedNs - queueNsByIndex.get(lastOut + 1) >= STALL_MIN_NS) {
+                    watchdogOutputIndex = lastOut;
+                    result.watchdogFrame = frame.frameNumber;
+                    result.watchdogMs = (queuedNs - startNs) / 1_000_000L;
+                }
                 result.framesIn++;
                 result.lastFrameIn = frame.frameNumber;
 
@@ -418,7 +506,7 @@ public class StallCaptureReplayer {
     }
 
     // Mirrors MediaCodecDecoderRenderer.createBaseMediaFormat() and its configuration retry loop
-    private MediaCodec createDecoder(Surface surface, boolean ultraLowLatency) throws IOException {
+    private MediaCodec createDecoder(Surface surface, Options options) throws IOException {
         MediaCodecInfo decoderInfo = findDecoder(info.decoderName);
         if (decoderInfo == null) {
             throw new IOException("Decoder "+info.decoderName+" not found on this device");
@@ -441,7 +529,8 @@ public class StallCaptureReplayer {
                     format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);
                 }
             }
-            boolean newFormat = MediaCodecHelper.setDecoderLowLatencyOptions(format, decoderInfo, ultraLowLatency, tryNumber);
+            boolean newFormat = MediaCodecHelper.setDecoderLowLatencyOptions(format, decoderInfo, options.ultraLowLatency, tryNumber);
+            applyOverrides(format, options);
 
             MediaCodec codec = null;
             try {
@@ -475,7 +564,6 @@ public class StallCaptureReplayer {
         final MediaCodec codec;
         final Result result;
         volatile boolean finished;
-        private int lastOutputIndex = -1;
 
         OutputThread(MediaCodec codec, Result result) {
             super("Stall replay output");
@@ -492,16 +580,18 @@ public class StallCaptureReplayer {
                 // given the oldest frame it hadn't answered, not from the last output, so a
                 // burst of input after a gap isn't mistaken for a stall. Like the watchdog,
                 // ignore startup before the first output.
-                int oldestUnanswered = lastOutputIndex + 1;
-                int queued = lastQueuedIndex - lastOutputIndex;
-                if (lastOutputIndex >= 0 && oldestUnanswered <= lastQueuedIndex && queued >= STALL_MIN_FRAMES) {
+                int lastOut = lastOutputIndex;
+                int oldestUnanswered = lastOut + 1;
+                int queued = lastQueuedIndex - lastOut;
+                if (lastOut >= 0 && oldestUnanswered <= lastQueuedIndex && queued >= STALL_MIN_FRAMES) {
                     long waitNs = System.nanoTime() - queueNsByIndex.get(oldestUnanswered);
                     if (waitNs >= STALL_MIN_NS) {
                         result.stalls.add("no output for "+waitNs / 1_000_000L+" ms after frame "+
                                 result.lastFrameOut+" with "+queued+" frames queued");
                     }
                 }
-                lastOutputIndex = Math.max(lastOutputIndex, frameIndex);
+                // Only this thread writes it
+                lastOutputIndex = Math.max(lastOut, frameIndex);
                 result.framesOut++;
                 result.lastFrameOut = frameNumber;
             }

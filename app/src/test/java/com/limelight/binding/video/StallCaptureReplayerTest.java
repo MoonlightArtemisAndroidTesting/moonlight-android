@@ -78,6 +78,59 @@ public class StallCaptureReplayerTest {
         assertFalse(info.tenBit);
     }
 
+    private static StallCaptureReplayer.Result result(int framesIn, int framesOut, int lastFrameIn, int lastFrameOut, boolean drained) {
+        StallCaptureReplayer.Result r = new StallCaptureReplayer.Result();
+        r.framesIn = framesIn;
+        r.framesOut = framesOut;
+        r.lastFrameIn = lastFrameIn;
+        r.lastFrameOut = lastFrameOut;
+        r.drained = drained;
+        return r;
+    }
+
+    @Test
+    public void stuckDecoderThatStillReturnsEndOfStreamIsAPermanentStall() {
+        // Soak run 12: the decoder stopped at frame 1715 but still passed end of stream through
+        StallCaptureReplayer.Result r = result(2663, 1714, 2664, 1715, true);
+        r.watchdogFrame = 1718;
+        r.watchdogMs = 28650;
+        assertTrue(r.permanentStall());
+        assertTrue(r.reproduced());
+        assertEquals(949, r.missingFrames());
+        assertTrue(r.toString().contains("STALL REPRODUCED: output stopped after frame 1715"));
+        assertTrue(r.toString().contains("watchdog would have fired at frame 1718"));
+        assertFalse(r.toString().contains("Not reproduced"));
+    }
+
+    @Test
+    public void missingEndOfStreamIsAPermanentStall() {
+        StallCaptureReplayer.Result r = result(2663, 2000, 2664, 2001, false);
+        assertTrue(r.permanentStall());
+    }
+
+    @Test
+    public void skippedFramesWithOutputContinuingAreNotPermanent() {
+        StallCaptureReplayer.Result r = result(2663, 2660, 2664, 2664, true);
+        assertFalse(r.permanentStall());
+        assertTrue(r.reproduced());
+        assertTrue(r.toString().contains("Decoder skipped 3 frames"));
+    }
+
+    @Test
+    public void cleanRunIsNotReproduced() {
+        StallCaptureReplayer.Result r = result(2663, 2663, 2664, 2664, true);
+        assertFalse(r.permanentStall());
+        assertFalse(r.reproduced());
+        assertTrue(r.toString().contains("Not reproduced: every frame decoded"));
+    }
+
+    @Test
+    public void cancelledRunIsNotAStall() {
+        StallCaptureReplayer.Result r = result(1000, 990, 1001, 991, false);
+        r.abortReason = "cancelled";
+        assertFalse(r.permanentStall());
+    }
+
     @Test(expected = IOException.class)
     public void rejectsCaptureInfoWithoutDecoder() throws IOException {
         File txt = tmp.newFile("stall-bad.txt");
