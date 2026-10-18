@@ -32,7 +32,8 @@ import java.util.Locale;
 // hardware decoder, to check whether a stall reproduces from the video data alone. Lists the
 // captures in the app's stall-captures folder; others can be added there with adb push.
 public class StallReplayActivity extends AppCompatActivity implements SurfaceHolder.Callback {
-    private static final int[] REPEAT_COUNTS = {1, 3, 5, 10};
+    // The longer counts are for soak tests: about 165 runs of a 44 second capture is 2 hours
+    private static final int[] REPEAT_COUNTS = {1, 3, 5, 10, 50, 100, 200};
 
     private File captureDir;
     private final List<File> captures = new ArrayList<>();
@@ -154,6 +155,8 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                 log("Reading the capture into memory first...");
                 log(String.format(Locale.US, "Read at %.0f MB/s", replayer.warmUp()));
 
+                long soakStartMs = System.currentTimeMillis();
+                long framesDecoded = 0;
                 for (int run = 1; run <= repeats && !stopRequested; run++) {
                     activeReplayer = replayer;
                     StallCaptureReplayer.Result result = replayer.run(surface, options);
@@ -163,6 +166,7 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                     }
 
                     completed++;
+                    framesDecoded += result.framesOut;
                     if (result.reproduced()) {
                         reproduced++;
                     }
@@ -171,7 +175,11 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                     appendResult(base, options, line);
                 }
 
-                String summary = "Summary for "+base+": stall reproduced in "+reproduced+" of "+completed+" run(s)";
+                // Frames and time let the result be compared with the live stall rate
+                String summary = String.format(Locale.US,
+                        "Summary for %s: stall reproduced in %d of %d run(s), %d frames decoded over %.1f minutes",
+                        base, reproduced, completed, framesDecoded,
+                        (System.currentTimeMillis() - soakStartMs) / 60000.0);
                 log(summary);
                 appendResult(base, options, summary);
             } catch (IOException | RuntimeException e) {
