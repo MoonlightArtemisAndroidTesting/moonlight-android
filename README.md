@@ -11,6 +11,163 @@ Artemis is currently the best fork of Moonlight with loads of optimizations for 
 
 A more seamless experience with virtual display will be Artemis paired with [Apollo](https://github.com/ClassicOldSong/Apollo).
 
+# Testing branch: HEVC stall diagnostics
+
+> **This branch is for troubleshooting, not for everyday use.** It contains everything from the
+> end-user branch (`upstream-pr/s905x5-hevc`) plus tools for investigating the Amlogic HEVC decoder
+> hang. For normal streaming, use the end-user branch and its releases.
+
+## The problem being investigated
+
+On boxes with the `c2.amlogic.hevc.decoder` (for example the Onn 4K Pro V2), HEVC streams freeze
+about 1.5–2.5 times an hour: the decoder keeps accepting video but stops producing frames. The
+stall watchdog on the end-user branch clears each freeze within a fraction of a second by asking
+the PC for a keyframe, but the goal is to stop the decoder getting stuck at all.
+
+The tools below let the hang be recorded during a live stream and then reproduced offline on the
+box, with no PC, so decoder settings can be tested quickly.
+
+## Tools
+
+All of these are in **Settings → Advanced Settings**. Capture only runs where the stall watchdog
+does (HEVC on `c2.amlogic.hevc` decoders), and replay needs a device with the decoder named in the
+capture. Slices per frame applies on any device.
+
+### Slices per frame
+
+Sets how many slices the PC splits each video frame into: **Auto** (the decoder's default, which is
+1 on Amlogic), 1, 2, 4 or 8. It's sent to the PC when a stream starts, so change it before
+connecting. Use it to check whether the slice layout affects how often the decoder hangs.
+
+### Capture video on decoder stall
+
+When the stall watchdog catches a hang, this saves the video the decoder received leading up to it.
+It's off by default.
+
+- **How it works:** the app records the HEVC video it sends to the decoder in segments, each
+  starting at a keyframe. When the next keyframe arrives, the previous segment is deleted, unless a
+  stall happened in it. Recording runs on a low-priority background thread, so it can't slow the
+  stream down.
+- **Where captures go:** `Android/data/<app package>/files/stall-captures/`. For the debug build
+  ("Diana"), that's `/sdcard/Android/data/com.limelight.noirdebug/files/stall-captures/`. Each
+  capture is three files:
+
+  | File | Contents |
+  |---|---|
+  | `stall-<time>.h265` | The raw HEVC video, playable with `ffplay` |
+  | `stall-<time>.csv` | One row per piece of video data (frame number, type, byte position), with `#` lines marking where each stall was detected |
+  | `stall-<time>.txt` | Decoder, resolution, frame rate, bitrate, bit depth, slices per frame, the exact decoder configuration, and device details |
+
+- **Overlay:** with the performance overlay on, `Stall captures saved: N` shows how many have been
+  saved this stream.
+- **Limits:** a segment is dropped if it grows past 1 GB without a keyframe. With HEVC
+  reference-frame invalidation off, keyframes can be many minutes apart, and 1 GB is only about 2–3
+  minutes at 70 Mbps, so many hangs can't be captured. Lost ones are listed in `lost-captures.txt`.
+  Saved captures are limited to 2 GB in total, deleting the oldest first. Keep about 3 GB free.
+
+To copy captures to a PC and check whether the video data itself is valid:
+
+```bash
+adb pull /sdcard/Android/data/com.limelight.noirdebug/files/stall-captures
+```
+
+```bash
+ffmpeg -v error -i stall-<time>.h265 -f null -
+```
+
+No output from ffmpeg means the video data was valid.
+
+### Replay stall capture
+
+Plays a saved capture through the box's hardware decoder, set up the same way as for a real
+stream, and reports whether and where the decoder got stuck. It needs no PC or network. The screen
+lists the captures in `stall-captures`; copy others there with `adb push` (all three files).
+
+**Options:**
+
+- **Timing:**
+  - **Original timing:** feeds each frame at the moment it was originally received during the
+    stream, from the `.csv`. Closest to a live stream.
+  - **As fast as possible:** feeds frames as fast as the decoder accepts them (about 2.2× real time
+    at 4K).
+- **Output handling:**
+  - **Like the stream** (default): handles decoder output exactly as the app does during a stream.
+    It follows your "prefer lower delays" setting: keep the newest finished frame and drop the rest,
+    and use a Choreographer thread for frame pacing.
+  - **Render every frame:** shows every decoded frame.
+- **Runs:** 1–200. About 165 runs of a 44-second capture is a 2-hour soak.
+- **Decoder settings,** each **App default / Off / On**, applied on top of the app's own settings:
+
+  | Setting | App default for `c2.amlogic.hevc` |
+  |---|---|
+  | Android low latency (`KEY_LOW_LATENCY`) | Off (skipped because it causes a slideshow on this decoder) |
+  | Amlogic low latency (`vdec-lowlatency`) | On |
+  | Vendor low latency (`vendor.low-latency.enable`) | On |
+  | Realtime priority / max operating rate | On (realtime priority, `KEY_PRIORITY = 0`) |
+
+The replay also uses your "ultra low latency" setting and reads the whole capture into memory
+before the first run, so storage speed can't affect the results.
+
+**Reading the results.** Each run's result is shown on screen and added to
+`stall-captures/replay-results.txt`:
+
+| Result | Meaning |
+|---|---|
+| `Not reproduced: every frame decoded` | A clean run |
+| `STALL REPRODUCED: output stopped after frame N and never resumed, M frames never came out` | **The hang.** The decoder stopped producing frames and stayed stuck for the rest of the run, as it would in a stream until the watchdog requests a keyframe. The result also gives the frame where the watchdog would have fired |
+| `Temporary stalls: no output for X ms after frame N ...` | The decoder paused but recovered on its own |
+| `Decoder skipped N frames but kept going` | Some frames never came out, but output continued |
+| `Replay input fell behind (not a decoder problem): ...` | The replay itself couldn't feed a frame on time, usually because the box was busy. Not a decoder fault |
+
+A stuck Amlogic decoder still passes the end-of-stream marker through, so the replay judges a run
+by whether every frame came out, not by whether the stream ended.
+
+The **summary** at the end of a set of runs gives the number of permanent stalls, runs with
+temporary stalls or skipped frames, frames decoded, elapsed time, permanent stalls per hour of
+video, and the decoder settings used.
+
+**How stalls are detected:**
+
+- **Original timing:** the watchdog's own rule. A stall is when 3 or more frames are waiting and
+  the oldest has waited 50 ms or more.
+- **As fast as possible:** the decoder's queue is always full, so every frame naturally waits about
+  60 ms and that rule would flag every frame. Instead, a stall is no output for 50 ms or more while
+  frames are waiting. A decoder that stops accepting input counts as a permanent stall.
+
+**Tips:**
+
+- **Don't test right after booting the box.** For the first few minutes the box is busy and the
+  first run tends to fall behind.
+- **Change one decoder setting at a time.** Run each for about 2 hours, and also run a baseline
+  (everything on App default) on the same day for comparison.
+- **The hang is rare, so judge results by counts over long soaks.** At the baseline rate (about 1.7
+  an hour), a 2-hour soak should produce about 3–4 permanent stalls. Zero is a lead worth
+  repeating; 1–2 isn't conclusive.
+
+## Findings so far
+
+These are from an Onn 4K Pro V2, replaying one 4K60 HEVC capture (8-bit, 70 Mbps setting).
+
+- **The captured video data is valid.** ffmpeg decodes every frame without errors, including the
+  ones the decoder hung on.
+- **The hang reproduces offline at about the live rate, at random points.** It needs no network,
+  PC, audio or input, and specific frames don't trigger it: the same capture hangs at different
+  frames on different runs and plays cleanly on most.
+- **The app's output handling isn't the cause.** The hang happens with either output handling
+  option.
+- **Stalls may be tied to elapsed time rather than frames decoded.** Fast mode produced about the
+  same number of stalls per hour of testing as original timing, but only half as many per hour of
+  video. The counts are too small to be sure.
+- **Lead under investigation:** with **realtime priority off**, a 2-hour soak had **0** permanent
+  stalls, where about 3 would be expected at the baseline rate. This is being confirmed with a
+  repeat soak and a same-day baseline before any change to the app.
+
+| Soak (stream-style output) | Test time | Permanent stalls |
+|---|---|---|
+| Baseline, original timing | 106 min | 3 |
+| Baseline, as fast as possible | 68 min | 2 |
+| Realtime priority off, original timing | 116 min | 0 |
+
 # About this fork: Amlogic TV box fixes
 
 This fork of Artemis fixes streaming on Android TV boxes and sticks that use Amlogic's Codec2
