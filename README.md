@@ -158,15 +158,24 @@ These are from an Onn 4K Pro V2, replaying one 4K60 HEVC capture (8-bit, 70 Mbps
 - **Stalls may be tied to elapsed time rather than frames decoded.** Fast mode produced about the
   same number of stalls per hour of testing as original timing, but only half as many per hour of
   video. The counts are too small to be sure.
-- **Lead under investigation:** with **realtime priority off**, a 2-hour soak had **0** permanent
-  stalls, where about 3 would be expected at the baseline rate. This is being confirmed with a
-  repeat soak and a same-day baseline before any change to the app.
+- **Realtime priority off doesn't stop the hangs.** The first 2-hour soak with it off had 0
+  permanent stalls, but the repeat had 2. Across both, the rate was about a third of the baseline
+  (0.52 vs 1.72 an hour). With only 7 stalls in total, though, a gap that size happens by chance
+  about 1 time in 8, so it may make no difference at all. A same-day baseline is next, to check
+  whether the box's rate simply varies from day to day.
+- **Lesson for testing:** one zero-stall soak isn't enough. A setting needs 0 stalls in two separate
+  2-hour soaks before it counts as a real lead.
+- **Where stalls happen:** frames ~878, 1211, 1716, 1719, 1881, 2177 and 2453 of the same capture,
+  all P-frames, with no clear pattern.
 
 | Soak (stream-style output) | Test time | Permanent stalls |
 |---|---|---|
 | Baseline, original timing | 106 min | 3 |
 | Baseline, as fast as possible | 68 min | 2 |
 | Realtime priority off, original timing | 116 min | 0 |
+| Realtime priority off, original timing (repeat) | 116 min | 2 |
+| **Baseline total** | **174 min** | **5 (1.72 an hour)** |
+| **Realtime priority off total** | **232 min** | **2 (0.52 an hour)** |
 
 # About this fork: Amlogic TV box fixes
 
