@@ -1,5 +1,6 @@
 package com.limelight;
 
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -31,9 +32,33 @@ import java.util.Locale;
 // Testing tool: replays captures saved by "Capture video on decoder stall" through the same
 // hardware decoder, to check whether a stall reproduces from the video data alone. Lists the
 // captures in the app's stall-captures folder; others can be added there with adb push.
+//
+// It can also be started over ADB, so soaks can be run unattended:
+//   adb shell am start -n com.limelight.noirdebug/com.limelight.StallReplayActivity \
+//       --ez autoStart true --ei runs 165 --ez realTime true --ez appStyleOutput true \
+//       --ei vdecLowLatency 1 --es capture stall-20261017-201946-746
+// Decoder setting extras (androidLowLatency, vdecLowLatency, vendorLowLatency,
+// realtimePriority) take 0 = app default, 1 = off, 2 = on. Any extra left out keeps the
+// screen's default. Results go to replay-results.txt as usual.
 public class StallReplayActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     // The longer counts are for soak tests: about 165 runs of a 44 second capture is 2 hours
     private static final int[] REPEAT_COUNTS = {1, 3, 5, 10, 50, 100, 200};
+
+    // Launch extras, see the class comment
+    private static final String EXTRA_AUTO_START = "autoStart";
+    private static final String EXTRA_CAPTURE = "capture";
+    private static final String EXTRA_RUNS = "runs";
+    private static final String EXTRA_REAL_TIME = "realTime";
+    private static final String EXTRA_APP_STYLE_OUTPUT = "appStyleOutput";
+    private static final String EXTRA_ANDROID_LOW_LATENCY = "androidLowLatency";
+    private static final String EXTRA_VDEC_LOW_LATENCY = "vdecLowLatency";
+    private static final String EXTRA_VENDOR_LOW_LATENCY = "vendorLowLatency";
+    private static final String EXTRA_REALTIME_PRIORITY = "realtimePriority";
+
+    // Set from the launch extras: a run count not offered by the spinner, and whether to start
+    // as soon as the surface is ready
+    private int runsOverride;
+    private boolean pendingAutoStart;
 
     private File captureDir;
     private final List<File> captures = new ArrayList<>();
@@ -103,9 +128,75 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
                 stopReplay();
             }
             else {
+                runsOverride = 0;
                 startReplay();
             }
         });
+
+        applyLaunchOptions(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (replayThread != null) {
+            log("Ignoring new launch request: a replay is already running");
+            return;
+        }
+        applyLaunchOptions(intent);
+        if (pendingAutoStart && surface != null) {
+            pendingAutoStart = false;
+            startReplay();
+        }
+    }
+
+    // Applies ADB launch extras to the screen's controls, so the run is logged exactly as if
+    // they had been chosen by hand
+    private void applyLaunchOptions(Intent intent) {
+        if (intent == null || intent.getExtras() == null) {
+            return;
+        }
+
+        String capture = intent.getStringExtra(EXTRA_CAPTURE);
+        if (capture != null) {
+            int index = -1;
+            for (int i = 0; i < captures.size(); i++) {
+                if (captures.get(i).getName().equals(capture+".h265")) {
+                    index = i;
+                }
+            }
+            if (index < 0) {
+                log("Launch option: capture "+capture+" not found, not starting");
+                return;
+            }
+            captureSpinner.setSelection(index);
+        }
+
+        if (intent.hasExtra(EXTRA_REAL_TIME)) {
+            modeSpinner.setSelection(intent.getBooleanExtra(EXTRA_REAL_TIME, true) ? 0 : 1);
+        }
+        if (intent.hasExtra(EXTRA_APP_STYLE_OUTPUT)) {
+            outputSpinner.setSelection(intent.getBooleanExtra(EXTRA_APP_STYLE_OUTPUT, true) ? 1 : 0);
+        }
+        applySettingExtra(intent, EXTRA_ANDROID_LOW_LATENCY, androidLowLatencySpinner);
+        applySettingExtra(intent, EXTRA_VDEC_LOW_LATENCY, vdecLowLatencySpinner);
+        applySettingExtra(intent, EXTRA_VENDOR_LOW_LATENCY, vendorLowLatencySpinner);
+        applySettingExtra(intent, EXTRA_REALTIME_PRIORITY, realtimePrioritySpinner);
+        runsOverride = Math.max(0, intent.getIntExtra(EXTRA_RUNS, 0));
+        pendingAutoStart = intent.getBooleanExtra(EXTRA_AUTO_START, false);
+        if (pendingAutoStart) {
+            log("Started over ADB, the replay will begin once the screen is ready");
+        }
+    }
+
+    private static void applySettingExtra(Intent intent, String extra, Spinner spinner) {
+        if (intent.hasExtra(extra)) {
+            int value = intent.getIntExtra(extra, StallCaptureReplayer.SETTING_APP_DEFAULT);
+            if (value >= StallCaptureReplayer.SETTING_APP_DEFAULT && value <= StallCaptureReplayer.SETTING_ON) {
+                spinner.setSelection(value);
+            }
+        }
     }
 
     private void loadCaptures() {
@@ -142,7 +233,8 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
         String base = video.getName().replace(".h265", "");
         File index = new File(captureDir, base+".csv");
         File info = new File(captureDir, base+".txt");
-        int repeats = REPEAT_COUNTS[Math.max(0, repeatSpinner.getSelectedItemPosition())];
+        int repeats = runsOverride > 0 ? runsOverride :
+                REPEAT_COUNTS[Math.max(0, repeatSpinner.getSelectedItemPosition())];
         PreferenceConfiguration prefs = PreferenceConfiguration.readPreferences(this);
 
         StallCaptureReplayer.Options options = new StallCaptureReplayer.Options();
@@ -254,6 +346,11 @@ public class StallReplayActivity extends AppCompatActivity implements SurfaceHol
     public void surfaceCreated(@NonNull SurfaceHolder holder) {
         surface = holder.getSurface();
         startButton.setEnabled(!captures.isEmpty());
+
+        if (pendingAutoStart && replayThread == null) {
+            pendingAutoStart = false;
+            startReplay();
+        }
     }
 
     @Override

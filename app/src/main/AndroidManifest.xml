@@ -238,10 +238,12 @@
         <activity android:name=".DebugInfoActivity"
             android:launchMode="singleTask"/>
 
-        <!-- Testing tool for replaying decoder stall captures -->
+        <!-- Testing tool for replaying decoder stall captures. Exported so soaks can be started
+             over ADB with am start; it only replays files in the app's own folder. -->
         <activity android:name=".StallReplayActivity"
             android:screenOrientation="landscape"
-            android:launchMode="singleTask"/>
+            android:launchMode="singleTask"
+            android:exported="true"/>
 
         <!-- 无障碍 实体键盘 屏蔽某些快捷键 -->
         <service
