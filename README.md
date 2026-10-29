@@ -140,9 +140,9 @@ video, and the decoder settings used.
   first run tends to fall behind.
 - **Change one decoder setting at a time.** Run each for about 2 hours, and also run a baseline
   (everything on App default) on the same day for comparison.
-- **The hang is rare, so judge results by counts over long soaks.** At the baseline rate (about 1.7
-  an hour), a 2-hour soak should produce about 3–4 permanent stalls. Zero is a lead worth
-  repeating; 1–2 isn't conclusive.
+- **The hang is rare, so judge results by counts over long soaks.** At the baseline rate (about 1.4
+  an hour), a 2-hour soak should produce about 3 permanent stalls. Zero is a lead worth repeating;
+  1–2 isn't conclusive.
 
 ## Findings so far
 
@@ -158,23 +158,36 @@ These are from an Onn 4K Pro V2, replaying one 4K60 HEVC capture (8-bit, 70 Mbps
 - **Stalls may be tied to elapsed time rather than frames decoded.** Fast mode produced about the
   same number of stalls per hour of testing as original timing, but only half as many per hour of
   video. The counts are too small to be sure.
-- **Realtime priority off doesn't stop the hangs.** The first 2-hour soak with it off had 0
-  permanent stalls, but the repeat had 2. Across both, the rate was about a third of the baseline
-  (0.52 vs 1.72 an hour). With only 7 stalls in total, though, a gap that size happens by chance
-  about 1 time in 8, so it may make no difference at all. A same-day baseline is next, to check
-  whether the box's rate simply varies from day to day.
+- **No decoder setting stops the hangs.** Each of the four settings the replay can change was soaked
+  for about 2 hours on its own, and every one still produced permanent stalls (see the table). The
+  lowest rates, about 0.5 an hour, were still within chance of the baseline. Since the decoder hangs
+  at random on valid data whatever it's told, this looks like a fault inside the Amlogic HEVC
+  decoder that the app can't configure away. The practical fixes are the ones on the end-user
+  branch: the stall watchdog recovers from each hang, and Auto prefers AV1, which hasn't hung.
+- **Realtime priority off isn't a fix.** The first 2-hour soak with it off had 0 permanent stalls,
+  but the repeat had 2. Its rate (0.52 an hour) is about a third of the baseline, but with this few
+  stalls a gap that size happens by chance about 1 time in 8. The same-day baseline (0.94 an hour)
+  fell between the two, which points to chance too.
+- **`KEY_LOW_LATENCY` on also adds stutter.** Besides 1 permanent stall, 2 of its runs had bursts
+  of late output (up to 10 frames waiting) with 55 and 114 frames dropped. This fits the slideshow
+  problem that's the reason the app leaves it off.
 - **Lesson for testing:** one zero-stall soak isn't enough. A setting needs 0 stalls in two separate
   2-hour soaks before it counts as a real lead.
-- **Where stalls happen:** frames ~878, 1211, 1716, 1719, 1881, 2177 and 2453 of the same capture,
-  all P-frames, with no clear pattern.
+- **Where stalls happen:** frames ~75, 843, 878, 1155, 1211, 1333, 1461, 1716, 1719, 1839, 1881,
+  2177, 2197, 2453 and 2608 of the same capture, with no clear pattern. One came only about 1
+  second after the capture's opening keyframe.
 
-| Soak (stream-style output) | Test time | Permanent stalls |
+| Soak (original timing, stream-style output unless noted) | Test time | Permanent stalls |
 |---|---|---|
-| Baseline, original timing | 106 min | 3 |
+| Baseline | 106 min | 3 |
 | Baseline, as fast as possible | 68 min | 2 |
-| Realtime priority off, original timing | 116 min | 0 |
-| Realtime priority off, original timing (repeat) | 116 min | 2 |
-| **Baseline total** | **174 min** | **5 (1.72 an hour)** |
+| Baseline, same day as the setting soaks below | 128 min | 2 |
+| Realtime priority off | 116 min | 0 |
+| Realtime priority off (repeat) | 116 min | 2 |
+| Amlogic low latency (`vdec-lowlatency`) off | 128 min | 3 |
+| Vendor low latency (`vendor.low-latency.enable`) off | 128 min | 2 |
+| Android low latency (`KEY_LOW_LATENCY`) on | 118 min | 1 |
+| **Baseline total** | **302 min** | **7 (1.39 an hour)** |
 | **Realtime priority off total** | **232 min** | **2 (0.52 an hour)** |
 
 # About this fork: Amlogic TV box fixes
